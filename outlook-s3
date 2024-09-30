@@ -1,4 +1,190 @@
 
+
+
+
+import boto3
+import base64
+import os
+import requests
+import uuid
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime, timedelta
+from msal import ConfidentialClientApplication
+
+def lambda_handler(event, context):
+    scopes = ['https://graph.microsoft.com/.default']
+
+    # Azure AD App details
+    CLIENT_ID = 'kg,jkhg'
+    CLIENT_SECRET = 'mhgv,jhgv'
+    TENANT_ID = 'jhfjhcfv'
+	
+    # AWS S3 bucket details
+    S3_BUCKET = "pr-home-datascience/email_upload"
+    
+    # SMTP configuration
+    SMTP_SERVER = "smtp.example.com"
+    SMTP_PORT = 587
+    SMTP_USERNAME = "your-email@example.com"
+    SMTP_PASSWORD = "your-email-password"
+    RECIPIENT_EMAIL = "recipient@example.com"
+
+    # Set up MSAL
+    authority = f'https://login.microsoftonline.com/{TENANT_ID}'
+    app = ConfidentialClientApplication(CLIENT_ID, authority=authority, client_credential=CLIENT_SECRET)
+
+    # Authenticate and get token
+    result = app.acquire_token_for_client(scopes=scopes)
+    access_token = result['access_token']
+
+    # Calculate time range (last 2 hours)
+    now = datetime.utcnow()
+    two_hours_ago = now - timedelta(hours=2)
+
+    # Convert to ISO 8601 format for Microsoft Graph
+    start_time = two_hours_ago.isoformat() + "Z"  # 'Z' for UTC
+    end_time = now.isoformat() + "Z"
+
+    # Microsoft Graph API URL to fetch emails from the last 2 hours
+    graph_url = f'https://graph.microsoft.com/v1.0/users/HomeDSAWS@plymouthrock.com/mailFolders/inbox/messages?$filter=receivedDateTime ge {start_time} and receivedDateTime le {end_time}'
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json'
+    }
+    
+    s3 = boto3.client('s3')
+
+    def fetch_emails(graph_url):
+        while graph_url:
+            response = requests.get(graph_url, headers=headers)
+            emails = response.json().get('value', [])
+            process_emails(emails)
+            
+            # Check if there is another page of results
+            graph_url = response.json().get('@odata.nextLink')
+            print(graph_url)
+
+    def process_emails(emails):
+        print('emails count - ', len(emails))
+        for email in emails:
+            # Generate a unique UUID for folder name
+            folder_name = str(uuid.uuid4()) + '/'
+            
+            # Check if email with the same id (or UUID) already exists in S3
+            if email_already_exists(email['id'], folder_name):
+                print(f"Email {email['id']} already exists in S3. Skipping.")
+                continue
+            
+            try:
+                # Create a folder in S3 if it doesn't exist
+                s3.put_object(Bucket=S3_BUCKET, Key=folder_name+'/', Body=b'')
+                print(f"Folder {folder_name} created in Bucket")
+                
+                email_content = email['subject'] + email['body']['content']
+                
+                # Create a txt file with email subject and body in /tmp
+                filename = '/tmp/body.HTML'
+                with open(filename, 'w', encoding='utf-8') as file:
+                    file.write(email_content)
+                    
+                s3_key = f"{folder_name}/{os.path.basename(filename)}"
+                s3.upload_file(filename, S3_BUCKET, s3_key)
+                print(f"Uploaded email content as {filename} to S3")
+        
+            except Exception as e:
+                print('An error occurred', e)
+        
+            # Fetch attachments
+            attachments_url = f'https://graph.microsoft.com/v1.0/users/HomeDSAWS@plymouthrock.com/messages/{email["id"]}/attachments'
+            response1 = requests.get(attachments_url, headers=headers)
+            attachments = response1.json().get('value', [])
+            
+            for attachment in attachments:
+                if '@odata.type' in attachment and attachment['@odata.type'] == '#microsoft.graph.fileAttachment':
+                    attachment_content = base64.b64decode(attachment['contentBytes'])
+                    attachment_name = '/tmp/' + attachment['name']
+                    
+                    # Save attachment in /tmp directory
+                    with open(attachment_name, 'wb') as f:
+                        f.write(attachment_content)
+    
+                    # Upload to S3
+                    with open(attachment_name, 'rb') as f:
+                        s3.upload_fileobj(f, S3_BUCKET, f"{folder_name}/{os.path.basename(attachment_name)}")
+                    print(f"Uploaded {attachment_name} to S3")
+            
+            # Store the email ID in S3 to avoid reprocessing
+            store_email_id(email['id'], folder_name)
+
+            # Send an email notification after files are uploaded to S3
+            send_notification_email(folder_name)
+
+    def email_already_exists(email_id, folder_name):
+        """
+        Check if the email ID (or folder) already exists in S3 to avoid duplicates.
+        """
+        try:
+            response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=f"{folder_name}")
+            # If folder already exists or UUID is already in S3, skip processing
+            if 'Contents' in response:
+                return True
+        except Exception as e:
+            print(f"Error checking S3 for existing email: {e}")
+        return False
+
+    def store_email_id(email_id, folder_name):
+        """
+        Store a marker in S3 to indicate the email has been processed.
+        """
+        try:
+            marker_file = f"{folder_name}/processed_email.txt"
+            s3.put_object(Bucket=S3_BUCKET, Key=marker_file, Body=email_id.encode())
+            print(f"Stored processed email ID {email_id} in S3 at {marker_file}")
+        except Exception as e:
+            print(f"Error storing email ID in S3: {e}")
+
+    def send_notification_email(folder_name):
+        try:
+            subject = "S3 Upload Notification"
+            body = f"Files have been uploaded to the following S3 folder: {folder_name}"
+            msg = MIMEText(body)
+            msg["Subject"] = subject
+            msg["From"] = SMTP_USERNAME
+            msg["To"] = RECIPIENT_EMAIL
+
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.sendmail(SMTP_USERNAME, RECIPIENT_EMAIL, msg.as_string())
+                print(f"Notification email sent to {RECIPIENT_EMAIL}")
+        except Exception as e:
+            print(f"Error sending email: {e}")
+
+    # Start fetching emails
+    fetch_emails(graph_url)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import boto3
 import base64
 import os
