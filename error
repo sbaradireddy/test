@@ -1,0 +1,38 @@
+[ec2-user@ jenkins-img]$ docker build -t jenkins-upd .
+[+] Building 1.0s (5/12)                                                                                                                      docker:default
+ => [internal] load build definition from dockerfile                                                                                                    0.0s
+ => => transferring dockerfile: 2.12kB                                                                                                                  0.0s
+ => [internal] load metadata for 05615653457.dkr.ecr.us-east-1.amazonaws.com/prc-home-ds-jenkins:upd                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                       0.0s
+ => => transferring context: 2B                                                                                                                         0.0s
+ => [1/9] FROM 05615653457.dkr.ecr.us-east-1.amazonaws.com/prc-home-ds-jenkins:upd                                                                     0.2s
+ => ERROR [2/9] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     z  0.7s
+------
+ > [2/9] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1g-dev     libbz2-dev     libreadline-dev     libsqlite3-dev     libffi-dev     liblzma-dev     python-openssl     git     ca-certificates:
+0.206 Reading package lists...
+0.720 E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)
+0.720 E: Unable to lock directory /var/lib/apt/lists/
+------
+dockerfile:6
+--------------------
+   5 |     # Update the package list and install dependencies for Python
+   6 | >>> RUN apt-get update && \
+   7 | >>>     apt-get install -y \
+   8 | >>>     software-properties-common \
+   9 | >>>     build-essential \
+  10 | >>>     wget \
+  11 | >>>     curl \
+  12 | >>>     libssl-dev \
+  13 | >>>     zlib1g-dev \
+  14 | >>>     libbz2-dev \
+  15 | >>>     libreadline-dev \
+  16 | >>>     libsqlite3-dev \
+  17 | >>>     libffi-dev \
+  18 | >>>     liblzma-dev \
+  19 | >>>     python-openssl \
+  20 | >>>     git \
+  21 | >>>     ca-certificates
+  22 |     # 1. Install Python 2.7
+--------------------
+ERROR: failed to solve: process "/bin/sh -c apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1g-dev     libbz2-dev     libreadline-dev     libsqlite3-dev     libffi-dev     liblzma-dev     python-openssl     git     ca-certificates" did not complete successfully: exit code: 100
+
