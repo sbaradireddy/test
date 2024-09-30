@@ -1,102 +1,47 @@
- => ERROR [2/9] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     z  1.8s
-------
- > [2/9] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1g-dev     libbz2-dev     libreadline-dev     libsqlite3-dev     libffi-dev     liblzma-dev     python-openssl     git     ca-certificates:
-0.210 Hit:1 http://deb.debian.org/debian bookworm InRelease
-0.210 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
-0.210 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [48.0 kB]
-0.215 Hit:4 https://download.docker.com/linux/debian bookworm InRelease
-0.222 Get:5 https://apt.releases.hashicorp.com bookworm InRelease [12.9 kB]
-0.357 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [185 kB]
-0.573 Hit:7 https://packagecloud.io/github/git-lfs/debian bookworm InRelease
-0.633 Fetched 301 kB in 0s (688 kB/s)
-0.633 Reading package lists...
-1.139 W: https://apt.releases.hashicorp.com/dists/bookworm/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
-1.145 Reading package lists...
-1.640 Building dependency tree...
-1.769 Reading state information...
-1.773 Package python-openssl is not available, but is referred to by another package.
-1.773 This may mean that the package is missing, has been obsoleted, or
-1.773 is only available from another source
-1.773
-1.775 E: Package 'python-openssl' has no installation candidate
-------
-dockerfile:8
---------------------
-   7 |
-   8 | >>> RUN apt-get update && \
-   9 | >>>     apt-get install -y \
-  10 | >>>     software-properties-common \
-  11 | >>>     build-essential \
-  12 | >>>     wget \
-  13 | >>>     curl \
-  14 | >>>     libssl-dev \
-  15 | >>>     zlib1g-dev \
-  16 | >>>     libbz2-dev \
-  17 | >>>     libreadline-dev \
-  18 | >>>     libsqlite3-dev \
-  19 | >>>     libffi-dev \
-  20 | >>>     liblzma-dev \
-  21 | >>>     python-openssl \
-  22 | >>>     git \
-  23 | >>>     ca-certificates
-  24 |     # 1. Install Python 2.7
---------------------
-ERROR: failed to solve: process "/bin/sh -c apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1g-dev     libbz2-dev     libreadline-dev     libsqlite3-dev     libffi-dev     liblzma-dev     python-openssl     git     ca-certificates" did not complete successfully: exit code: 100
-[ec2-user@ip-172-28-245-91 jenkins-img]$ clear
-[ec2-user@ip-172-28-245-91 jenkins-img]$ vi dockerfile
-[ec2-user@ip-172-28-245-91 jenkins-img]$ docker build -t jenkins-upd .
-[+] Building 2.0s (5/13)                                                                                                                      docker:default
+jenkins-img]$ docker build -t jenkins-upd .
+[+] Building 7.6s (6/13)                                                                                                                      docker:default
  => [internal] load build definition from dockerfile                                                                                                    0.0s
- => => transferring dockerfile: 2.47kB                                                                                                                  0.0s
+ => => transferring dockerfile: 2.45kB                                                                                                                  0.0s
  => WARN: Empty continuation line found in: RUN usermod -aG docker jenkins && usermod -aG sudo jenkins && echo jenkins:jenkins | chpasswd && echo "EST  0.0s
  => [internal] load metadata for 056156273734.dkr.ecr.us-east-1.amazonaws.com/prc-home-ds-jenkins:upd                                                   0.0s
  => [internal] load .dockerignore                                                                                                                       0.0s
  => => transferring context: 2B                                                                                                                         0.0s
  => CACHED [ 1/10] FROM 056156273734.dkr.ecr.us-east-1.amazonaws.com/prc-home-ds-jenkins:upd                                                            0.0s
- => ERROR [ 2/10] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev      2.0s
+ => [ 2/10] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1  5.5s
+ => ERROR [ 3/10] RUN apt-get update && apt-get install -y python2                                                                                      2.0s
 ------
- > [ 2/10] RUN apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1g-dev     libbz2-dev     libreadline-dev     libsqlite3-dev     libffi-dev     liblzma-dev     python-openssl     git     ca-certificates:
-0.219 Hit:1 http://deb.debian.org/debian bookworm InRelease
-0.219 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
-0.222 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [48.0 kB]
-0.226 Hit:4 https://download.docker.com/linux/debian bookworm InRelease
-0.232 Get:5 https://apt.releases.hashicorp.com bookworm InRelease [12.9 kB]
-0.370 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [185 kB]
-0.769 Hit:7 https://packagecloud.io/github/git-lfs/debian bookworm InRelease
-0.830 Fetched 301 kB in 1s (484 kB/s)
-0.830 Reading package lists...
-1.335 W: https://apt.releases.hashicorp.com/dists/bookworm/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
-1.342 Reading package lists...
-1.841 Building dependency tree...
-1.964 Reading state information...
-1.969 Package python-openssl is not available, but is referred to by another package.
-1.969 This may mean that the package is missing, has been obsoleted, or
-1.969 is only available from another source
-1.969
-1.972 E: Package 'python-openssl' has no installation candidate
+ > [ 3/10] RUN apt-get update && apt-get install -y python2:
+0.199 Hit:1 http://deb.debian.org/debian bookworm InRelease
+0.199 Hit:2 http://deb.debian.org/debian bookworm-updates InRelease
+0.199 Hit:3 http://deb.debian.org/debian-security bookworm-security InRelease
+0.204 Hit:4 https://download.docker.com/linux/debian bookworm InRelease
+0.206 Hit:5 https://apt.releases.hashicorp.com bookworm InRelease
+0.761 Hit:6 https://packagecloud.io/github/git-lfs/debian bookworm InRelease
+0.822 Reading package lists...
+1.319 W: https://apt.releases.hashicorp.com/dists/bookworm/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+1.326 Reading package lists...
+1.835 Building dependency tree...
+1.963 Reading state information...
+1.968 Package python2 is not available, but is referred to by another package.
+1.968 This may mean that the package is missing, has been obsoleted, or
+1.968 is only available from another source
+1.968 However the following packages replace it:
+1.968   dh-python
+1.968
+1.970 E: Package 'python2' has no installation candidate
 ------
 
  1 warning found (use --debug to expand):
  - Empty continuation line found in: RUN usermod -aG docker jenkins && usermod -aG sudo jenkins && echo jenkins:jenkins | chpasswd && echo "EST" > /etc/timezone
-dockerfile:10
+dockerfile:27
 --------------------
-   9 |     # Update the package list and install dependencies for Python
-  10 | >>> RUN apt-get update && \
-  11 | >>>     apt-get install -y \
-  12 | >>>     software-properties-common \
-  13 | >>>     build-essential \
-  14 | >>>     wget \
-  15 | >>>     curl \
-  16 | >>>     libssl-dev \
-  17 | >>>     zlib1g-dev \
-  18 | >>>     libbz2-dev \
-  19 | >>>     libreadline-dev \
-  20 | >>>     libsqlite3-dev \
-  21 | >>>     libffi-dev \
-  22 | >>>     liblzma-dev \
-  23 | >>>     python-openssl \
-  24 | >>>     git \
-  25 | >>>     ca-certificates
+  25 |
   26 |     # 1. Install Python 2.7
+  27 | >>> RUN apt-get update && apt-get install -y python2
+  28 |     # 2. Install multiple Python 3.x versions
+  29 |     # Add deadsnakes PPA for multiple Python versions
 --------------------
-ERROR: failed to solve: process "/bin/sh -c apt-get update &&     apt-get install -y     software-properties-common     build-essential     wget     curl     libssl-dev     zlib1g-dev     libbz2-dev     libreadline-dev     libsqlite3-dev     libffi-dev     liblzma-dev     python-openssl     git     ca-certificates" did not complete successfully: exit code: 100
+ERROR: failed to solve: process "/bin/sh -c apt-get update && apt-get install -y python2" did not complete successfully: exit code: 100
+[ec2-user@ip-172-28-245-91 jenkins-img]$
+
+
