@@ -1,3 +1,18 @@
+
+for bucket in $(aws s3api list-buckets --query "Buckets[].Name" --output text); do
+    echo "Searching in bucket: $bucket"
+    aws s3 ls s3://$bucket/ --recursive | grep "folder_name/"
+done
+
+
+
+
+
+
+
+
+
+
 jenkins-img]$ docker build -t jenkins-upd .
 [+] Building 7.6s (6/13)                                                                                                                      docker:default
  => [internal] load build definition from dockerfile                                                                                                    0.0s
