@@ -1,6 +1,97 @@
 
 
+To find out which specific POL_PK values have NULL values associated with them in your SQL query, you can focus on capturing those POL_PK values that result in a NULL value for ORIG_POL_PK.
 
+Here’s how you can structure your SQL query to identify these specific POL_PK values:
+
+SQL Query to Identify Specific POL_PK with NULL Values
+
+WITH SQ_S10_MA_DMV_EXTRACT AS (
+    SELECT T_POL_DIM_HST.POL_PK
+    FROM CDWQA.dwadmn.v_pol_dim_hst_core T_POL_DIM_HST,
+         CDWQA.dwadmn.t_pol_pty_dim_hst T_POL_PTY_DIM_HST,
+         CDWQA.dwadmn.v_pol_veh_unit_dim_hst_core T_POL_VEH_UNIT_DIM_HST,
+         CDWQA.dwadmn.t_co_dim T_CO_DIM,
+         CDWQA.dwadmn.t_pol_addr_dim_hst T_POL_ADDR_DIM_HST,
+         CDWQA.dwadmn.t_pol_stat_trans_hst T_POL_STAT_TRANS_HST,
+         CDWQA.dwadmn.t_pol_cvg_fact T_POL_CVG_FACT 
+    WHERE T_POL_DIM_HST.CO_CD IN ('ALN_PRAC', 'ALN_PIC', 'PMC', 'PRAC')
+      AND (
+          (T_POL_DIM_HST.PROD_CD IN ('PA') 
+           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('AQ', 'CL', 'MC', 'MH', 'PPA'))
+          OR
+          (T_POL_DIM_HST.PROD_CD IN ('CA') 
+           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('PP', 'STV', 'TR', 'TR_TRAC', 'VAN'))
+      )
+      AND T_POL_DIM_HST.STATE_CD = 'CT'  
+      AND T_POL_DIM_HST.RCD_ACTN_TYP <> 'D' 
+      AND (
+          T_POL_STAT_TRANS_HST.POL_STAT_PK IN (
+              SELECT MAX(AL5.POL_STAT_PK)
+              FROM CDWQA.DWADMN.V_POL_STAT_TRANS_HST AL5
+              WHERE AL5.DATA_DT <= '2024-09-01' 
+                AND AL5.POL_PK = T_POL_STAT_TRANS_HST.POL_PK
+          )
+          AND T_POL_STAT_TRANS_HST.POL_STAT = 'ACTIVE'
+          AND T_POL_STAT_TRANS_HST.POL_STATE_EFF_DT <= '2024-09-01'
+          AND T_POL_STAT_TRANS_HST.ROW_XPTN_DT > '2024-09-01' 
+          AND T_POL_CVG_FACT.CNTRBT_TO_PRMM_FLG = 'Y'
+          AND T_POL_CVG_FACT.RCD_ACTN_TYP <> 'D'
+      )
+      AND T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG = 'Y'
+      AND T_POL_PTY_DIM_HST.NAMD_INSD_FLG = 'Y' 
+      AND T_POL_VEH_UNIT_DIM_HST.POL_STATE_STAT = 'ACTIVE'  
+      AND T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP <> 'D' 
+      AND T_POL_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK 
+      AND T_POL_VEH_UNIT_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK 
+      AND T_CO_DIM.CO_ID = T_POL_DIM_HST.CO_ID
+      AND T_POL_DIM_HST.POL_PK = T_POL_ADDR_DIM_HST.POL_PK 
+      AND T_POL_STAT_TRANS_HST.POL_PK = T_POL_DIM_HST.POL_PK 
+      AND T_POL_CVG_FACT.POL_PK = T_POL_DIM_HST.POL_PK
+), 
+SQ_S10_MA_DMV_EXTRACT_TEMP AS (
+    -- Query for source qualifier function
+    SELECT row_number() OVER (ORDER BY POL_PK) AS source_record_id,
+           POL_PK
+    FROM SQ_S10_MA_DMV_EXTRACT
+), 
+EXPTRANS AS (
+    -- Query for expression function
+    SELECT SQ_S10_MA_DMV_EXTRACT_TEMP.source_record_id,
+           SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK,
+           LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK
+    FROM SQ_S10_MA_DMV_EXTRACT_TEMP
+    LEFT JOIN (
+        -- Query for lookup function
+        SELECT ORIG_POL_PK,
+               POL_PK,
+               row_number() OVER (PARTITION BY POL_PK ORDER BY POL_PK) AS rn
+        FROM CDWQA.DWADMN.T_POL_STAT_DIM_HST
+        WHERE LTRIM(RTRIM(CDWQA.DWADMN.T_POL_STAT_DIM_HST.STAT_TRAN_CODE)) = 'CREDIT'
+        QUALIFY rn = 1
+    ) LKP_PRIOR_VERSN_POL_PK
+    ON LKP_PRIOR_VERSN_POL_PK.POL_PK = SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK
+)
+
+-- Final SELECT statement to retrieve POL_PK with NULL ORIG_POL_PK
+SELECT SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK,
+       SQ_S10_MA_DMV_EXTRACT_TEMP.source_record_id
+FROM SQ_S10_MA_DMV_EXTRACT_TEMP
+LEFT JOIN EXPTRANS ON SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK = EXPTRANS.POL_PK
+WHERE EXPTRANS.ORIG_POL_PK IS NULL;  -- Check for NULL values in ORIG_POL_PK
+
+Explanation of Key Sections:
+
+	1.	CTEs:
+	•	SQ_S10_MA_DMV_EXTRACT: Extracts the relevant POL_PK values based on various filtering criteria.
+	•	SQ_S10_MA_DMV_EXTRACT_TEMP: Adds a sequential source_record_id to each POL_PK.
+	•	EXPTRANS: Joins the temporary extract with the lookup to get ORIG_POL_PK.
+	2.	Final Selection:
+	•	The final SELECT statement retrieves the POL_PK and source_record_id from the SQ_S10_MA_DMV_EXTRACT_TEMP where the associated ORIG_POL_PK in EXPTRANS is NULL. This allows you to see which specific POL_PK values have NULL for ORIG_POL_PK.
+
+Result:
+
+By executing this query, you’ll get a list of POL_PK values along with their source_record_id that are associated with NULL values in ORIG_POL_PK. This helps you pinpoint the exact entries that need attention for further data validation or correction.
 
 import boto3
 import base64
