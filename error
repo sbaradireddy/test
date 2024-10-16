@@ -1,246 +1,111 @@
 
-
-
-WITH SQ_S10_MA_DMV_EXTRACT AS (
-    SELECT T_POL_DIM_HST.POL_PK
-     FROM  CDWQA.dwadmn.v_pol_dim_hst_core T_POL_DIM_HST,
-              CDWQA.dwadmn.t_pol_pty_dim_hst T_POL_PTY_DIM_HST,
-               CDWQA.dwadmn.v_pol_veh_unit_dim_hst_core T_POL_VEH_UNIT_DIM_HST,
-               CDWQA.dwadmn.t_co_dim T_CO_DIM,
-              CDWQA.dwadmn.t_pol_addr_dim_hst T_POL_ADDR_DIM_HST,
-              CDWQA.dwadmn.t_pol_stat_trans_hst T_POL_STAT_TRANS_HST,
-              CDWQA.dwadmn.t_pol_cvg_fact T_POL_CVG_FACT 
-    
-   
-    WHERE T_POL_DIM_HST.CO_CD IN ('ALN_PRAC', 'ALN_PIC', 'PMC', 'PRAC')
-      AND (
-          (T_POL_DIM_HST.PROD_CD IN ('PA') 
-           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('AQ', 'CL', 'MC', 'MH', 'PPA'))
-          OR
-          (T_POL_DIM_HST.PROD_CD IN ('CA') 
-           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('PP', 'STV', 'TR', 'TR_TRAC', 'VAN'))
-      )
-      AND T_POL_DIM_HST.STATE_CD = 'CT'  
-      AND T_POL_DIM_HST.RCD_ACTN_TYP <> 'D' 
-      AND (
-          T_POL_STAT_TRANS_HST.POL_STAT_PK IN (
-              SELECT MAX(AL5.POL_STAT_PK)
-              FROM CDWQA.DWADMN.V_POL_STAT_TRANS_HST AL5
-              WHERE AL5.DATA_DT <= '2024-09-01' 
-                AND AL5.POL_PK = T_POL_STAT_TRANS_HST.POL_PK
-          )
-          AND T_POL_STAT_TRANS_HST.POL_STAT = 'ACTIVE'
-          AND T_POL_STAT_TRANS_HST.POL_STATE_EFF_DT <= '2024-09-01'
-          AND T_POL_STAT_TRANS_HST.ROW_XPTN_DT > '2024-09-01' 
-          AND T_POL_CVG_FACT.CNTRBT_TO_PRMM_FLG = 'Y'
-          AND (NOT T_POL_CVG_FACT.RCD_ACTN_TYP = 'D')
-      )
-      AND T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG = 'Y'
-      AND T_POL_PTY_DIM_HST.NAMD_INSD_FLG = 'Y' 
-      AND T_POL_VEH_UNIT_DIM_HST.POL_STATE_STAT = 'ACTIVE'  
-      AND T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP <> 'D' 
-      AND T_POL_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK 
-      AND T_POL_VEH_UNIT_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK 
-      AND T_CO_DIM.CO_ID = T_POL_DIM_HST.CO_ID
-      AND T_POL_DIM_HST.POL_PK = T_POL_ADDR_DIM_HST.POL_PK 
-      AND T_POL_STAT_TRANS_HST.POL_PK = T_POL_DIM_HST.POL_PK 
-      AND T_POL_CVG_FACT.POL_PK = T_POL_DIM_HST.POL_PK
-), 
-SQ_S10_MA_DMV_EXTRACT_TEMP AS (
-    -- Query for source qualifier function
-    SELECT row_number() OVER (ORDER BY POL_PK) AS source_record_id,
-           POL_PK
-    FROM SQ_S10_MA_DMV_EXTRACT
-), 
-EXPTRANS AS (
-    -- Query for expression function
-    SELECT SQ_S10_MA_DMV_EXTRACT_TEMP.source_record_id,
-           SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK,
-           LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK
-                    --  COALESCE(LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK, SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK) AS ORIG_POL_PK
-    FROM SQ_S10_MA_DMV_EXTRACT_TEMP
-    LEFT JOIN (
-        -- Query for lookup function
-        SELECT ORIG_POL_PK,
-               POL_PK,
-               row_number() OVER (PARTITION BY POL_PK ORDER BY POL_PK) AS rn
-        FROM CDWQA.DWADMN.T_POL_STAT_DIM_HST
-        WHERE LTRIM(RTRIM(CDWQA.DWADMN.T_POL_STAT_DIM_HST.STAT_TRAN_CODE)) = 'CREDIT'
-        qualify rn = 1
-    ) LKP_PRIOR_VERSN_POL_PK
-    ON LKP_PRIOR_VERSN_POL_PK.POL_PK = SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK
-   -- WHERE rn = 1
-    WHERE LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK IS 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-WITH SQ_S10_MA_DMV_EXTRACT AS (
-    SELECT T_POL_DIM_HST.POL_PK
-     FROM  CDWQA.dwadmn.v_pol_dim_hst_core T_POL_DIM_HST,
-              CDWQA.dwadmn.t_pol_pty_dim_hst T_POL_PTY_DIM_HST,
-               CDWQA.dwadmn.v_pol_veh_unit_dim_hst_core T_POL_VEH_UNIT_DIM_HST,
-               CDWQA.dwadmn.t_co_dim T_CO_DIM,
-              CDWQA.dwadmn.t_pol_addr_dim_hst T_POL_ADDR_DIM_HST,
-              CDWQA.dwadmn.t_pol_stat_trans_hst T_POL_STAT_TRANS_HST,
-              CDWQA.dwadmn.t_pol_cvg_fact T_POL_CVG_FACT 
-    
-   
-    WHERE T_POL_DIM_HST.CO_CD IN ('ALN_PRAC', 'ALN_PIC', 'PMC', 'PRAC')
-      AND (
-          (T_POL_DIM_HST.PROD_CD IN ('PA') 
-           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('AQ', 'CL', 'MC', 'MH', 'PPA'))
-          OR
-          (T_POL_DIM_HST.PROD_CD IN ('CA') 
-           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('PP', 'STV', 'TR', 'TR_TRAC', 'VAN'))
-      )
-      AND T_POL_DIM_HST.STATE_CD = 'CT'  
-      AND T_POL_DIM_HST.RCD_ACTN_TYP <> 'D' 
-      AND (
-          T_POL_STAT_TRANS_HST.POL_STAT_PK IN (
-              SELECT MAX(AL5.POL_STAT_PK)
-              FROM CDWQA.DWADMN.V_POL_STAT_TRANS_HST AL5
-              WHERE AL5.DATA_DT <= '2024-09-01' 
-                AND AL5.POL_PK = T_POL_STAT_TRANS_HST.POL_PK
-          )
-          AND T_POL_STAT_TRANS_HST.POL_STAT = 'ACTIVE'
-          AND T_POL_STAT_TRANS_HST.POL_STATE_EFF_DT <= '2024-09-01'
-          AND T_POL_STAT_TRANS_HST.ROW_XPTN_DT > '2024-09-01' 
-          AND T_POL_CVG_FACT.CNTRBT_TO_PRMM_FLG = 'Y'
-          AND (NOT T_POL_CVG_FACT.RCD_ACTN_TYP = 'D')
-      )
-      AND T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG = 'Y'
-      AND T_POL_PTY_DIM_HST.NAMD_INSD_FLG = 'Y' 
-      AND T_POL_VEH_UNIT_DIM_HST.POL_STATE_STAT = 'ACTIVE'  
-      AND T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP <> 'D' 
-      AND T_POL_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK 
-      AND T_POL_VEH_UNIT_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK 
-      AND T_CO_DIM.CO_ID = T_POL_DIM_HST.CO_ID
-      AND T_POL_DIM_HST.POL_PK = T_POL_ADDR_DIM_HST.POL_PK 
-      AND T_POL_STAT_TRANS_HST.POL_PK = T_POL_DIM_HST.POL_PK 
-      AND T_POL_CVG_FACT.POL_PK = T_POL_DIM_HST.POL_PK
-), 
-SQ_S10_MA_DMV_EXTRACT_TEMP AS (
-    -- Query for source qualifier function
-    SELECT row_number() OVER (ORDER BY POL_PK) AS source_record_id,
-           POL_PK
-    FROM SQ_S10_MA_DMV_EXTRACT
-), 
-EXPTRANS AS (
-    -- Query for expression function
-    SELECT SQ_S10_MA_DMV_EXTRACT_TEMP.source_record_id,
-           SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK,
-           LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK
-                    --  COALESCE(LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK, SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK) AS ORIG_POL_PK
-    FROM SQ_S10_MA_DMV_EXTRACT_TEMP
-    LEFT JOIN (
-        -- Query for lookup function
-        SELECT ORIG_POL_PK,
-               POL_PK,
-               row_number() OVER (PARTITION BY POL_PK ORDER BY POL_PK) AS rn
-        FROM CDWQA.DWADMN.T_POL_STAT_DIM_HST
-        WHERE LTRIM(RTRIM(CDWQA.DWADMN.T_POL_STAT_DIM_HST.STAT_TRAN_CODE)) = 'CREDIT'
-        qualify rn = 1
-    ) LKP_PRIOR_VERSN_POL_PK
-    ON LKP_PRIOR_VERSN_POL_PK.POL_PK = SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK
-   -- WHERE rn = 1
-    WHERE LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK IS 
-
-
-
-
-
-
-
-
-
-
-
-WITH SQ_S10_MA_DMV_EXTRACT AS (
-    SELECT T_POL_DIM_HST.POL_PK
-     FROM  CDWQA.dwadmn.v_pol_dim_hst_core T_POL_DIM_HST,
-              CDWQA.dwadmn.t_pol_pty_dim_hst T_POL_PTY_DIM_HST,
-               CDWQA.dwadmn.v_pol_veh_unit_dim_hst_core T_POL_VEH_UNIT_DIM_HST,
-               CDWQA.dwadmn.t_co_dim T_CO_DIM,
-              CDWQA.dwadmn.t_pol_addr_dim_hst T_POL_ADDR_DIM_HST,
-              CDWQA.dwadmn.t_pol_stat_trans_hst T_POL_STAT_TRANS_HST,
-              CDWQA.dwadmn.t_pol_cvg_fact T_POL_CVG_FACT 
-    
-   
-    WHERE T_POL_DIM_HST.CO_CD IN ('ALN_PRAC', 'ALN_PIC', 'PMC', 'PRAC')
-      AND (
-          (T_POL_DIM_HST.PROD_CD IN ('PA') 
-           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('AQ', 'CL', 'MC', 'MH', 'PPA'))
-          OR
-          (T_POL_DIM_HST.PROD_CD IN ('CA') 
-           AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('PP', 'STV', 'TR', 'TR_TRAC', 'VAN'))
-      )
-      AND T_POL_DIM_HST.STATE_CD = 'CT'  
-      AND T_POL_DIM_HST.RCD_ACTN_TYP <> 'D' 
-      AND (
-          T_POL_STAT_TRANS_HST.POL_STAT_PK IN (
-              SELECT MAX(AL5.POL_STAT_PK)
-              FROM CDWQA.DWADMN.V_POL_STAT_TRANS_HST AL5
-              WHERE AL5.DATA_DT <= '2024-09-01' 
-                AND AL5.POL_PK = T_POL_STAT_TRANS_HST.POL_PK
-          )
-          AND T_POL_STAT_TRANS_HST.POL_STAT = 'ACTIVE'
-          AND T_POL_STAT_TRANS_HST.POL_STATE_EFF_DT <= '2024-09-01'
-          AND T_POL_STAT_TRANS_HST.ROW_XPTN_DT > '2024-09-01' 
-          AND T_POL_CVG_FACT.CNTRBT_TO_PRMM_FLG = 'Y'
-          AND (NOT T_POL_CVG_FACT.RCD_ACTN_TYP = 'D')
-      )
-      AND T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG = 'Y'
-      AND T_POL_PTY_DIM_HST.NAMD_INSD_FLG = 'Y' 
-      AND T_POL_VEH_UNIT_DIM_HST.POL_STATE_STAT = 'ACTIVE'  
-      AND T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP <> 'D' 
-      AND T_POL_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK 
-      AND T_POL_VEH_UNIT_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK 
-      AND T_CO_DIM.CO_ID = T_POL_DIM_HST.CO_ID
-      AND T_POL_DIM_HST.POL_PK = T_POL_ADDR_DIM_HST.POL_PK 
-      AND T_POL_STAT_TRANS_HST.POL_PK = T_POL_DIM_HST.POL_PK 
-      AND T_POL_CVG_FACT.POL_PK = T_POL_DIM_HST.POL_PK
-), 
-SQ_S10_MA_DMV_EXTRACT_TEMP AS (
-    -- Query for source qualifier function
-    SELECT row_number() OVER (ORDER BY POL_PK) AS source_record_id,
-           POL_PK
-    FROM SQ_S10_MA_DMV_EXTRACT
-), 
-EXPTRANS AS (
-    -- Query for expression function
-    SELECT SQ_S10_MA_DMV_EXTRACT_TEMP.source_record_id,
-           SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK,
-           LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK
-                    --  COALESCE(LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK, SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK) AS ORIG_POL_PK
-    FROM SQ_S10_MA_DMV_EXTRACT_TEMP
-    LEFT JOIN (
-        -- Query for lookup function
-        SELECT ORIG_POL_PK,
-               POL_PK,
-               row_number() OVER (PARTITION BY POL_PK ORDER BY POL_PK) AS rn
-        FROM CDWQA.DWADMN.T_POL_STAT_DIM_HST
-        WHERE LTRIM(RTRIM(CDWQA.DWADMN.T_POL_STAT_DIM_HST.STAT_TRAN_CODE)) = 'CREDIT'
-        qualify rn = 1
-    ) LKP_PRIOR_VERSN_POL_PK
-    ON LKP_PRIOR_VERSN_POL_PK.POL_PK = SQ_S10_MA_DMV_EXTRACT_TEMP.POL_PK
-   -- WHERE rn = 1
-    WHERE LKP_PRIOR_VERSN_POL_PK.ORIG_POL_PK IS NULL
-)
+WITH SQ_S10_NJ_DMV_EXTRACT_temp as (
+        SELECT row_number() over(order by POL_PK) AS source_record_id,
+               T_POL_ADDR_DIM_HST.STATE,
+               T_POL_ADDR_DIM_HST.CNTY,
+               T_POL_ADDR_DIM_HST.PSTL_CD,
+               T_POL_DIM_HST.PRE_CONV_CO_CD,
+               T_POL_ADDR_DIM_HST.ADDR_PK,
+               T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG,
+               T_POL_ADDR_DIM_HST.HSE_NUM,
+               T_POL_DIM_HST.POL_PK,
+               T_POL_DIM_HST.POL_NUM,
+               T_POL_DIM_HST.POL_SEQ_NUM,
+               T_POL_DIM_HST.LAPSE_BEGIN_DT,
+               T_POL_DIM_HST.LAPSE_END_DT,
+               T_POL_DIM_HST.DATA_DT,
+               T_POL_DIM_HST.PROD_CD,
+               T_POL_DIM_HST.PLN_CD,
+               T_POL_DIM_HST.CNCL_TYP,
+               T_POL_DIM_HST.POL_VRSN_TXN_TYP,
+               T_POL_DIM_HST.ROW_STAT,
+               T_POL_DIM_HST.CUR_TERM_EFF_DT,
+               T_POL_DIM_HST.CUR_TERM_XPTN_DT,
+               T_POL_DIM_HST.CNCL_RSN,
+               T_POL_DIM_HST.RCD_ACTN_TYP,
+               T_POL_FLG_DIM_HST.PRIME_CONV_FLG,
+               T_POL_FLG_DIM_HST.PRIME_POL_FLG,
+               T_POL_CT_DIM_HST.VEH_CT,
+               T_POL_DIM_HST.PRCSG_GRP_CD,
+               T_POL_DIM_HST.POL_STATE_STAT,
+               T_POL_DIM_HST.SRC_POL_ID,
+               T_POL_DIM_HST.CO_ID,
+               T_POL_DIM_HST.PROD_ID,
+               T_POL_DIM_HST.POL_STATE_VRSN,
+               T_POL_DIM_HST.POL_STATE_EFF_DT,
+               T_POL_DIM_HST.ROW_XPTN_DT,
+               T_POL_DIM_HST.CORP_CD,
+               T_POL_DIM_HST.CO_CD,
+               T_POL_DIM_HST.SRC_PROD_ID,
+               T_POL_DIM_HST.SRC_CD,
+               T_POL_DIM_HST.CNCL_EFF_DT,
+               T_POL_DIM_HST.REINST_EFF_DT,
+               T_POL_DIM_HST.ACCTG_DT,
+               T_POL_DIM_HST.REINST_TYP,
+               T_POL_PTY_DIM_HST.DRVR_LIC_NUM,
+               T_POL_PTY_DIM_HST.DRVR_LIC_STATE,
+               T_POL_PTY_DIM_HST.INSD_PTY_PK,
+               T_POL_PTY_DIM_HST.SRC_PTY_ID,
+               T_POL_PTY_DIM_HST.NAM_FST,
+               T_POL_PTY_DIM_HST.NAM_LST,
+               T_POL_PTY_DIM_HST.NAM_MDL,
+               T_POL_PTY_DIM_HST.NAM_SFX,
+               T_POL_PTY_DIM_HST.BUS_NAM,
+               T_POL_PTY_DIM_HST.PMRY_NAMD_INSD_FLG,
+               T_POL_PTY_DIM_HST.NAMD_INSD_FLG,
+               T_POL_PTY_DIM_HST.DRVR_FLG,
+               T_POL_VEH_UNIT_DIM_HST.STAT_MAKE_CD,
+               T_POL_VEH_UNIT_DIM_HST.MODEL_YR,
+               T_POL_VEH_UNIT_DIM_HST.MK,
+               T_POL_VEH_UNIT_DIM_HST.VEH_UNIT_PK,
+               T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP AS RCD_ACTN_TYP_veh,
+               T_POL_VEH_UNIT_DIM_HST.ORGL_EFF_DT,
+               T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD,
+               T_POL_VEH_UNIT_DIM_HST.VIN,
+               T_CO_DIM.SRC_CORP_ID,
+               T_CO_DIM.SRC_CO_ID,
+               T_POL_ADDR_DIM_HST.ADDRESS1,
+               T_POL_ADDR_DIM_HST.ADDRESS2,
+               T_POL_ADDR_DIM_HST.ADDRESS3,
+               T_POL_ADDR_DIM_HST.ADDRESS4,
+               T_POL_ADDR_DIM_HST.CITY
+          FROM CDWQA.DWADMN.T_POL_ADDR_DIM_HST,
+               CDWQA.DWADMN.T_POL_PTY_DIM_HST,
+               CDWQA.DWADMN.T_POL_FLG_DIM_HST,
+               CDWQA.DWADMN.T_POL_CT_DIM_HST,
+               CDWQA.DWADMN.T_POL_VEH_UNIT_DIM_HST,
+               CDWQA.DWADMN.T_POL_DIM_HST,
+               CDWQA.DWADMN.T_CO_DIM
+         WHERE T_POL_ADDR_DIM_HST.POL_PK=T_POL_DIM_HST.POL_PK
+           AND T_POL_PTY_DIM_HST.POL_PK=T_POL_DIM_HST.POL_PK
+           AND T_POL_FLG_DIM_HST.POL_PK=T_POL_DIM_HST.POL_PK
+           AND T_POL_CT_DIM_HST.POL_PK=T_POL_DIM_HST.POL_PK
+           AND T_POL_VEH_UNIT_DIM_HST.POL_PK=T_POL_DIM_HST.POL_PK
+           AND T_POL_DIM_HST.CO_ID=T_CO_DIM.CO_ID
+		   and RTRIM(T_Pol_Dim_Hst.PRCSG_GRP_CD) IN ('HP', 'PL')
+           and RTRIM(T_POL_DIM_HST.STATE_CD)='NJ'
+           and RTRIM(T_Pol_Dim_Hst.CO_CD) IN ('HPPREF', 'HPPROP', 'HPPROP2', 'HPSIC', 'PAIPTWIN', 'PIC', 'PSIA', 'TCTIPU', 'TCTIPU2', 'ALN_HPCIC', 'ALN_TEACH', 'ALN_PSIA','ALN_PIC')
+           and RTRIM(T_Pol_Dim_Hst.CORP_CD) IN ('HIGHPOINT', 'Palisades')
+           AND ((RTRIM(T_Pol_Dim_Hst.PROD_CD) IN ('PA', 'PAIP')) OR (RTRIM(T_Pol_Dim_Hst.PROD_CD) = 'PIC_NEW_CA' and T_Pol_Dim_Hst.LEG_ENT_CD = 'A') OR (RTRIM(T_Pol_Dim_Hst.PROD_CD) = 'PIC_NEW_CA' and LTRIM(RTRIM(T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD)) = 'LMO' AND T_POL_CT_DIM_HST.VEH_CT <= 5))
+           and T_Pol_Dim_Hst.RCD_ACTN_TYP <> 'D'
+           and ((T_POL_DIM_HST.ACCTG_DT <= '{{BATCH_END_DT}}'
+AND
+T_POL_DIM_HST.POL_STATE_EFF_DT <= '{{RPRTG_PERIOD_END_DT}}' AND T_POL_DIM_HST.POL_STATE_EFF_DT >= '{{RPRTG_PERIOD_START_DT}}')
+OR
+(T_POL_DIM_HST.ACCTG_DT <= '{{BATCH_END_DT}}' AND T_POL_DIM_HST.ACCTG_DT >= '{{BATCH_START_DT}}'
+AND
+T_POL_DIM_HST.POL_STATE_EFF_DT < '{{RPRTG_PERIOD_START_DT}}'))
+           and ((T_Pol_Dim_Hst.Pol_Vrsn_Txn_Typ = 'NB' and (T_Pol_Dim_Hst.conv_pol = 'N' or T_Pol_Dim_Hst.conv_pol is null)) or (T_POL_FLG_DIM_HST.PRIME_CONV_FLG = 'Y' and T_Pol_Dim_Hst.CO_CD = 'ALN_PIC' and T_POL_DIM_HST.POL_VRSN_TXN_TYP = 'RN') or (T_POL_FLG_DIM_HST.PRIME_CONV_FLG = 'Y' and T_Pol_Dim_Hst.CO_CD = 'ALN_PSIA' and T_POL_DIM_HST.POL_VRSN_TXN_TYP = 'RN' and T_POL_DIM_HST. PRE_CONV_CO_CD = 'PIC') or (T_Pol_Dim_Hst.Pol_Vrsn_Txn_Typ = 'RN' and T_Pol_Dim_Hst.ict_dt = T_Pol_Dim_Hst.cur_term_eff_dt and T_POL_CT_DIM_HST.ict_ct = 1) or (SUBSTR(T_POL_DIM_HST.POL_VRSN_TXN_TYP,1,2) = 'EN' and T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP = 'A' and T_POL_DIM_HST.POL_STATE_EFF_DT >= T_POL_DIM_HST.CUR_TERM_EFF_DT) or (RTRIM(LTRIM(T_POL_DIM_HST.POL_VRSN_TXN_TYP)) IN ('CN', 'CNX') AND RTRIM(LTRIM(T_POL_DIM_HST.CNCL_RSN)) IN ('NONPAY','NP','NP_CR','NP_PF')) or (SUBSTR(T_POL_DIM_HST.POL_VRSN_TXN_TYP,1,2) = 'RS' AND RTRIM(LTRIM(T_POL_DIM_HST.REINST_TYP)) = 'WITH LAPSE' AND RTRIM(LTRIM(T_POL_DIM_HST.CNCL_RSN)) IN ('NONPAY','NP','NP_CR','NP_PF')) OR (SUBSTR(T_POL_DIM_HST.POL_VRSN_TXN_TYP,1,2) = 'RS' AND RTRIM(LTRIM(T_POL_DIM_HST.REINST_TYP)) = 'REINSTATE' AND RTRIM(LTRIM(T_POL_DIM_HST.CNCL_RSN)) IN ('NONPAY','NP','NP_CR','NP_PF') AND T_POL_DIM_HST.ROW_STAT = 'C'))
+           AND T_Pol_Veh_Unit_Dim_Hst.Veh_Typ_Cd IN ('AQ', 'CL', 'CV', 'PP', 'PPA', 'PPP','LMO','VAN')
+           AND T_Pol_Pty_Dim_Hst.Pmry_Namd_Insd_Flg='Y'
+           AND T_Pol_Addr_Dim_Hst.Pmry_Addr_Flg='Y'
+           AND (T_POL_FLG_DIM_HST.MOTORCYCLE_POL_FLG != 'Y' OR T_POL_FLG_DIM_HST.MOTORCYCLE_POL_FLG IS NULL)
+           AND NOT EXISTS (
+                SELECT *
+                  from RRM.T_ESS_SMOKETEST_POLICIES
+                 where T_ESS_SMOKETEST_POLICIES.STATE_CD=T_POL_DIM_HST.STATE_CD
+                   and T_ESS_SMOKETEST_POLICIES.POL_NUM=T_POL_DIM_HST.POL_NUM
+               )
+       ) 
+       select * from SQ_S10_NJ_DMV_EXTRACT_TEMP
+     
