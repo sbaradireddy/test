@@ -1,5 +1,110 @@
 SQ_S10_NJ_DMV_EXTRACT AS (
     SELECT 
+        ROW_NUMBER() OVER (ORDER BY POL_PK) AS source_record_id,
+        T_POL_ADDR_DIM_HST.STATE,
+        T_POL_ADDR_DIM_HST.CNTY,
+        T_POL_ADDR_DIM_HST.PSTL_CD,
+        T_POL_DIM_HST.PRE_CONV_CO_CD,
+        T_POL_ADDR_DIM_HST.ADDR_PK,
+        -- Continue with the rest of the column list as needed
+
+    FROM 
+        T_POL_ADDR_DIM_HST,
+        T_POL_PTY_DIM_HST,
+        T_POL_FLG_DIM_HST,
+        T_POL_CT_DIM_HST,
+        T_POL_VEH_UNIT_DIM_HST,
+        T_POL_DIM_HST,
+        T_CO_DIM
+
+    WHERE 
+        T_POL_ADDR_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+        AND T_POL_PTY_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+        AND T_POL_FLG_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+        AND T_POL_CT_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+        AND T_POL_VEH_UNIT_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+        AND T_POL_DIM_HST.CO_ID = T_CO_DIM.CO_ID
+        AND RTRIM(T_POL_DIM_HST.PRCSG_GRP_CD) IN ('HP', 'PL')
+        AND RTRIM(T_POL_DIM_HST.STATE_CD) = 'NJ'
+        AND RTRIM(T_POL_DIM_HST.CO_CD) IN ('HPPREF', 'HPPROP', 'HPPROP2', 'HPSIC', 'PAIPTWIN', 'PIC', 'PSIA', 'TCTIPU', 'TCTIPU2', 'ALN_HPCIC', 'ALN_TEACH', 'ALN_PSIA', 'ALN_PIC')
+        AND RTRIM(T_POL_DIM_HST.CORP_CD) IN ('HIGHPOINT', 'Palisades')
+
+        AND (
+            RTRIM(T_POL_DIM_HST.PROD_CD) IN ('PA', 'PAIP') 
+            OR (RTRIM(T_POL_DIM_HST.PROD_CD) = 'PIC_NEW_CA' AND T_POL_DIM_HST.LEG_ENT_CD = 'A') 
+            OR (RTRIM(T_POL_DIM_HST.PROD_CD) = 'PIC_NEW_CA' 
+                AND LTRIM(RTRIM(T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD)) = 'LMO' 
+                AND T_POL_CT_DIM_HST.VEH_CT <= 5)
+        )
+        
+        AND T_POL_DIM_HST.RCD_ACTN_TYP <> 'D'
+        AND (
+            (T_POL_DIM_HST.ACCTG_DT <= '{{BATCH_END_DT}}'
+             AND T_POL_DIM_HST.POL_STATE_EFF_DT <= '{{RPRTG_PERIOD_END_DT}}'
+             AND T_POL_DIM_HST.POL_STATE_EFF_DT >= '{{RPRTG_PERIOD_START_DT}}')
+        OR 
+            (T_POL_DIM_HST.ACCTG_DT <= '{{BATCH_END_DT}}' 
+             AND T_POL_DIM_HST.ACCTG_DT >= '{{BATCH_START_DT}}'
+             AND T_POL_DIM_HST.POL_STATE_EFF_DT < '{{RPRTG_PERIOD_START_DT}}')
+        )
+
+        AND (
+            (T_POL_DIM_HST.POL_VRSN_TXN_TYP = 'NB' 
+             AND (T_POL_DIM_HST.conv_pol = 'N' OR T_POL_DIM_HST.conv_pol IS NULL)) 
+        OR 
+            (T_POL_FLG_DIM_HST.PRIME_CONV_FLG = 'Y' 
+             AND T_POL_DIM_HST.CO_CD = 'ALN_PIC' 
+             AND T_POL_DIM_HST.POL_VRSN_TXN_TYP = 'RN') 
+        OR 
+            (T_POL_FLG_DIM_HST.PRIME_CONV_FLG = 'Y' 
+             AND T_POL_DIM_HST.CO_CD = 'ALN_PSIA' 
+             AND T_POL_DIM_HST.POL_VRSN_TXN_TYP = 'RN' 
+             AND T_POL_DIM_HST.PRE_CONV_CO_CD = 'PIC') 
+        OR 
+            (T_POL_DIM_HST.POL_VRSN_TXN_TYP = 'RN' 
+             AND T_POL_DIM_HST.ict_dt = T_POL_DIM_HST.cur_term_eff_dt 
+             AND T_POL_CT_DIM_HST.ict_ct = 1) 
+        OR 
+            (SUBSTR(T_POL_DIM_HST.POL_VRSN_TXN_TYP, 1, 2) = 'EN' 
+             AND T_POL_VEH_UNIT_DIM_HST.RCD_ACTN_TYP = 'A' 
+             AND T_POL_DIM_HST.POL_STATE_EFF_DT >= T_POL_DIM_HST.CUR_TERM_EFF_DT) 
+        OR 
+            (RTRIM(LTRIM(T_POL_DIM_HST.POL_VRSN_TXN_TYP)) IN ('CN', 'CNX') 
+             AND RTRIM(LTRIM(T_POL_DIM_HST.CNCL_RSN)) IN ('NONPAY', 'NP', 'NP_CR', 'NP_PF')) 
+        OR 
+            (SUBSTR(T_POL_DIM_HST.POL_VRSN_TXN_TYP, 1, 2) = 'RS' 
+             AND RTRIM(LTRIM(T_POL_DIM_HST.REINST_TYP)) = 'WITH LAPSE' 
+             AND RTRIM(LTRIM(T_POL_DIM_HST.CNCL_RSN)) IN ('NONPAY', 'NP', 'NP_CR', 'NP_PF')) 
+        OR 
+            (SUBSTR(T_POL_DIM_HST.POL_VRSN_TXN_TYP, 1, 2) = 'RS' 
+             AND RTRIM(LTRIM(T_POL_DIM_HST.REINST_TYP)) = 'REINSTATE' 
+             AND RTRIM(LTRIM(T_POL_DIM_HST.CNCL_RSN)) IN ('NONPAY', 'NP', 'NP_CR', 'NP_PF') 
+             AND T_POL_DIM_HST.ROW_STAT = 'C')
+        )
+        
+        AND T_POL_VEH_UNIT_DIM_HST.VEH_TYP_CD IN ('AQ', 'CL', 'CV', 'PP', 'PPA', 'PPP', 'LMO', 'VAN')
+        AND T_POL_PTY_DIM_HST.PMRY_NAMD_INSD_FLG = 'Y'
+        AND T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG = 'Y'
+        AND (T_POL_FLG_DIM_HST.MOTORCYCLE_POL_FLG != 'Y' OR T_POL_FLG_DIM_HST.MOTORCYCLE_POL_FLG IS NULL)
+
+        AND NOT EXISTS (
+            SELECT * 
+            FROM ERM.T_ESS_SMOKETEST_POLICIES
+            WHERE ERM.T_ESS_SMOKETEST_POLICIES.STATE_CD = T_POL_DIM_HST.STATE_CD
+            AND ERM.T_ESS_SMOKETEST_POLICIES.POL_NUM = T_POL_DIM_HST.POL_NUM
+        )
+)
+
+
+
+
+
+
+
+
+
+SQ_S10_NJ_DMV_EXTRACT AS (
+    SELECT 
         row_number() OVER (ORDER BY POL_PK) AS source_record_id,
         T_POL_ADDR_DIM_HST.STATE,
         T_POL_ADDR_DIM_HST.CNTY,
