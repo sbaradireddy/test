@@ -1,32 +1,4 @@
---Informatica Object Names 
---Workflow Name: WFL_NJ_DMV_MONTHLY_EXTRACT 
---Mapping Name: M_S10_NJ_DMV_ALL_EXTRACT 
---Folder: BURRPT_NJ_DMV 
---Session: s_M_S10_NJ_DMV_EXTRACT 
---File Name: WFL_NJ_DMV_MONTHLY_EXTRACT.xml 
- 
- 
-{{  
-config(
-schema = 'Add your schema here',
---alias = ['S10_NJ_DMV_MTHLY_EXTRACT'],
---scenario = 'insert',
-materialized = 'incremental',
-incremental_strategy = 'append',
-unique_key = [],
-merge_cols = [],
-source_pre_sql =[''],
-source_post_sql=[''],
-target_pre_sql =[],
-target_post_sql =[],
-table_prefix =[]
-)
-}}
 
-{% set RPRTG_PERIOD_START_DT = var('RPRTG_PERIOD_START_DT') %} 
-{% set RPRTG_PERIOD_END_DT = var('RPRTG_PERIOD_END_DT') %} 
-{% set BATCH_START_DT = var('BATCH_START_DT') %} 
-{% set BATCH_END_DT = var('BATCH_END_DT') %} 
 
 
 SQ_S10_NJ_DMV_EXTRACT as (
