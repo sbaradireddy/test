@@ -1,0 +1,31 @@
+        FROM SQ_S10_NJ_DMV_EXTRACT SQ_S10_NJ_DMV_EXTRACT
+          left join -- writting query for lookup function
+ (
+                SELECT T_POL_PTY_DIM_HST.INSD_PTY_PK as INSD_PTY_PK,
+                       T_POL_PTY_DIM_HST.SRC_PTY_ID as SRC_PTY_ID,
+                       T_POL_PTY_DIM_HST.NAM_FST as NAM_FST,
+                       T_POL_PTY_DIM_HST.NAM_LST as NAM_LST,
+                       T_POL_PTY_DIM_HST.NAM_MDL as NAM_MDL,
+                       T_POL_PTY_DIM_HST.NAM_SFX as NAM_SFX,
+                       T_POL_PTY_DIM_HST.PMRY_NAMD_INSD_FLG as PMRY_NAMD_INSD_FLG,
+                       T_POL_PTY_DIM_HST.NAMD_INSD_FLG as NAMD_INSD_FLG,
+                       T_POL_PTY_DIM_HST.DRVR_FLG as DRVR_FLG,
+                       T_POL_PTY_DIM_HST.DRVR_LIC_NUM as DRVR_LIC_NUM,
+                       T_POL_PTY_DIM_HST.DRVR_LIC_STATE as DRVR_LIC_STATE,
+                       T_POL_PTY_DIM_HST.POL_PK as POL_PK,
+                       row_number() over(partition by POL_PK order by POL_PK) as rn -- Please review the order by columns
+
+                  FROM T_POL_PTY_DIM_HST qualify rn = 1
+               ) LKP_ALT_LIC_NUM
+            on LKP_ALT_LIC_NUM.POL_PK = SQ_S10_NJ_DMV_EXTRACT.POL_PK
+          left join -- writting query for lookup function
+ (
+                select NCIC_VAL,
+                       VEH_MAKE_CD,
+                       row_number() over(partition by VEH_MAKE_CD order by VEH_MAKE_CD) as rn -- Please review the order by columns
+
+                  FROM NCIC_CODES_XREF qualify rn = 1
+               ) LKP_NCIC_VEH_MAKE_CODE
+            on LKP_NCIC_VEH_MAKE_CODE.VEH_MAKE_CD = UPPER(SQ_S10_NJ_DMV_EXTRACT.MK)
+     --  ) 
+       select * from exptrans
