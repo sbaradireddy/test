@@ -1,0 +1,183 @@
+WITH SQ_S10_NJ_DMV_EXTRACT AS (
+    SELECT 
+        ROW_NUMBER() OVER (ORDER BY TPDH.POL_PK) AS source_record_id, 
+        TPAH.STATE,
+        TPAH.CNTY,
+        TPAH.PSTL_CD,
+        TPDH.PRE_CONV_CO_CD,
+        TPAH.ADDR_PK,
+        TPAH.PMRY_ADDR_FLG,
+        TPAH.HSE_NUM,
+        TPDH.POL_PK, 
+        TPDH.POL_NUM,
+        TPDH.POL_SEQ_NUM,
+        TPDH.LAPSE_BEGIN_DT,
+        TPDH.LAPSE_END_DT,
+        TPDH.DATA_DT,
+        TPDH.PROD_CD,
+        TPDH.PLN_CD,
+        TPDH.CNCL_TYP,
+        TPDH.POL_VRSN_TXN_TYP,
+        TPDH.ROW_STAT,
+        TPDH.CUR_TERM_EFF_DT,
+        TPDH.CUR_TERM_XPTN_DT,
+        TPDH.CNCL_RSN,
+        TPDH.RCD_ACTN_TYP,
+        TPFDH.PRIME_CONV_FLG,
+        TPFDH.PRIME_POL_FLG,
+        TPCTH.VEH_CT,
+        TPDH.PRCSG_GRP_CD,
+        TPDH.POL_STATE_STAT,
+        TPDH.SRC_POL_ID,
+        TPDH.CO_ID,
+        TPDH.PROD_ID,
+        TPDH.POL_STATE_VRSN,
+        TPDH.POL_STATE_EFF_DT,
+        TPDH.ROW_XPTN_DT,
+        TPDH.CORP_CD,
+        TPDH.CO_CD,
+        TPDH.SRC_PROD_ID,
+        TPDH.SRC_CD,
+        TPDH.CNCL_EFF_DT,
+        TPDH.REINST_EFF_DT,
+        TPDH.ACCTG_DT,
+        TPDH.REINST_TYP,
+        TPPDH.DRVR_LIC_NUM,
+        TPPDH.DRVR_LIC_STATE,
+        TPPDH.INSD_PTY_PK,
+        TPPDH.SRC_PTY_ID,
+        TPPDH.NAM_FST,
+        TPPDH.NAM_LST,
+        TPPDH.NAM_MDL,
+        TPPDH.NAM_SFX,
+        TPPDH.BUS_NAM,
+        TPPDH.PMRY_NAMD_INSD_FLG,
+        TPPDH.NAMD_INSD_FLG,
+        TPPDH.DRVR_FLG,
+        TPVUDH.STAT_MAKE_CD,
+        TPVUDH.MODEL_YR,
+        TPVUDH.MK,
+        TPVUDH.VEH_UNIT_PK,
+        TPVUDH.RCD_ACTN_TYP AS RCD_ACTN_TYP_veh,
+        TPVUDH.ORGL_EFF_DT,
+        TPVUDH.VEH_TYP_CD,
+        TPVUDH.VIN,
+        TCD.SRC_CORP_ID,
+        TCD.SRC_CO_ID,
+        TPAH.ADDRESS1,
+        TPAH.ADDRESS2,
+        TPAH.ADDRESS3,
+        TPAH.ADDRESS4,
+        TPAH.CITY
+    FROM 
+        CDWQA.DWADMN.T_POL_ADDR_DIM_HST TPAH
+        JOIN CDWQA.DWADMN.T_POL_PTY_DIM_HST TPPDH ON TPPDH.POL_PK = TPDH.POL_PK
+        JOIN CDWQA.DWADMN.T_POL_FLG_DIM_HST TPFDH ON TPFDH.POL_PK = TPDH.POL_PK
+        JOIN CDWQA.DWADMN.T_POL_CT_DIM_HST TPCTH ON TPCTH.POL_PK = TPDH.POL_PK
+        JOIN CDWQA.DWADMN.T_POL_VEH_UNIT_DIM_HST TPVUDH ON TPVUDH.POL_PK = TPDH.POL_PK
+        JOIN CDWQA.DWADMN.T_POL_DIM_HST TPDH ON TPAH.POL_PK = TPDH.POL_PK
+        JOIN CDWQA.DWADMN.T_CO_DIM TCD ON TPDH.CO_ID = TCD.CO_ID
+    WHERE 
+        RTRIM(TPDH.PRCSG_GRP_CD) IN ('HP', 'PL')
+        AND RTRIM(TPDH.STATE_CD) = 'NJ'
+        AND RTRIM(TPDH.CO_CD) IN ('HPPREF', 'HPPROP', 'HPPROP2', 'HPSIC', 'PAIPTWIN', 'PIC', 'PSIA', 'TCTIPU', 'TCTIPU2', 'ALN_HPCIC', 'ALN_TEACH', 'ALN_PSIA', 'ALN_PIC')
+        AND RTRIM(TPDH.CORP_CD) IN ('HIGHPOINT', 'Palisades')
+        AND (
+            (RTRIM(TPDH.PROD_CD) IN ('PA', 'PAIP'))
+            OR (RTRIM(TPDH.PROD_CD) = 'PIC_NEW_CA' AND TPDH.LEG_ENT_CD = 'A')
+            OR (RTRIM(TPDH.PROD_CD) = 'PIC_NEW_CA' AND LTRIM(RTRIM(TPVUDH.VEH_TYP_CD)) = 'LMO' AND TPCTH.VEH_CT <= 5)
+        )
+        AND TPDH.RCD_ACTN_TYP <> 'D'
+        AND (
+            (TPDH.ACCTG_DT <= '2024-09-30' AND TPDH.POL_STATE_EFF_DT <= '2024-08-31' AND TPDH.POL_STATE_EFF_DT >= '2024-08-01')
+            OR (TPDH.ACCTG_DT <= '2024-09-30' AND TPDH.ACCTG_DT >= '2024-09-01' AND TPDH.POL_STATE_EFF_DT < '2024-08-01')
+        )
+)
+, EXPTRANS AS (
+    SELECT 
+        source_record_id,
+        POL_PK,
+        POL_NUM,
+        POL_SEQ_NUM,
+        POL_STATE_VRSN,
+        POL_STATE_EFF_DT,
+        ROW_XPTN_DT,
+        POL_VRSN_TXN_TYP,
+        ROW_STAT,
+        RCD_ACTN_TYP,
+        DATA_DT,
+        PRIME_POL_FLG,
+        PRCSG_GRP_CD,
+        POL_STATE_STAT,
+        SRC_POL_ID,
+        CO_ID,
+        PROD_ID,
+        CORP_CD,
+        CO_CD,
+        SRC_PROD_ID,
+        PROD_CD,
+        PLN_CD,
+        CUR_TERM_EFF_DT,
+        CUR_TERM_XPTN_DT,
+        CNCL_RSN,
+        CNCL_TYP,
+        CNCL_EFF_DT,
+        REINST_EFF_DT,
+        ACCTG_DT,
+        REINST_TYP,
+        LAPSE_BEGIN_DT,
+        LAPSE_END_DT,
+        VEH_UNIT_PK,
+        RCD_ACTN_TYP_veh,
+        ORGL_EFF_DT,
+        VEH_TYP_CD,
+        VIN,
+        MODEL_YR,
+        MK,
+        STAT_MAKE_CD,
+        ADDR_PK,
+        PMRY_ADDR_FLG,
+        HSE_NUM,
+        ADDRESS1,
+        ADDRESS2,
+        ADDRESS3,
+        ADDRESS4,
+        CITY,
+        STATE,
+        CNTY,
+        PSTL_CD,
+        INSD_PTY_PK,
+        SRC_PTY_ID,
+        NAM_FST,
+        NAM_LST,
+        NAM_MDL,
+        NAM_SFX,
+        BUS_NAM,
+        PMRY_NAMD_INSD_FLG,
+        NAMD_INSD_FLG,
+        SRC_CORP_ID,
+        SRC_CO_ID,
+        DRVR_FLG,
+        DRVR_LIC_NUM,
+        DRVR_LIC_STATE,
+        PRE_CONV_CO_CD,
+        SRC_CD,
+        PRIME_CONV_FLG
+    FROM SQ_S10_NJ_DMV_EXTRACT
+)
+, EXP_PRIMARY_DRIVER AS (
+    SELECT 
+        source_record_id,
+        lkp_INSD_PTY_PK AS INSD_PTY_PK_PRMRY_DRVR,
+        lkp_SRC_PTY_ID AS SRC_PTY_ID_PRMRY_DRVR,
+        lkp_NAM_FST AS NAM_FST_PRMRY_DRVR,
+        lkp_NAM_LST AS NAM_LST_PRMRY_DRVR,
+        lkp_NAM_MDL AS NAM_MDL__PRMRY_DRVR,
+        lkp_NAM_SFX AS NAM_SFX_PRMRY_DRVR,
+        lkp_PMRY_NAMD_INSD_FLG AS NAMD_INSD_FLG_PRMRY_DRVR,
+        lkp_DRVR_FLG AS DRVR_FLG_PRMRY_DRVR,
+        lkp_DRVR_LIC_NUM AS DRVR_LIC_NUM_PRMRY_DRVR,
+        lkp_DRVR_LIC_STATE AS DRVR_LIC_STATE__PRMRY_DRVR
+    FROM EXPTRANS
+)
+SELECT * FROM EXP_PRIMARY_DRIVER;
