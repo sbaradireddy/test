@@ -1,3 +1,28 @@
+
+LEFT JOIN (
+    SELECT * FROM (
+        SELECT 
+            NCIC_VAL,
+            VEH_MAKE_CD,
+            ROW_NUMBER() OVER (PARTITION BY VEH_MAKE_CD ORDER BY VEH_MAKE_CD) AS rn
+        FROM 
+            rdmdev.burrpt.NCIC_CODES_XREF
+    ) AS LKP_NCIC_VEH_MAKE_CODE  -- Properly alias the subquery
+    WHERE rn = 1                 -- Filter the row number after aliasing
+) LKP_NCIC_VEH_MAKE_CODE          -- Reference the subquery alias in the join
+ON LKP_NCIC_VEH_MAKE_CODE.VEH_MAKE_CD = SQ_S10_NJ_DMV_EXTRACT.MK
+
+
+
+
+
+
+
+
+
+
+
+
 WITH SQ_S10_NJ_DMV_EXTRACT AS (
 SELECT
 	ROW_NUMBER() OVER (
