@@ -91,187 +91,93 @@ If you find null values, you'll need to correct them in the source data or handl
 5. Validate Data Load Process:
 If you are pulling data from an external source (e.g., ETL process or staging tables), ensure that the record is loaded correctly into all the relevant tables. There might be an issue during data extraction or loading that is causing the record to be omitted.
 
-Summary of Steps:
---Informatica Object Names 
---Workflow Name: WFL_NJ_DMV_MONTHLY_EXTRACT 
---Mapping Name: M_S15_NJ_DMV_ALL_EXTRACT 
---Folder: BURRPT_NJ_DMV 
---Session: s_M_S15_NJ_DMV_EXTRACT 
---File Name: WFL_NJ_DMV_MONTHLY_EXTRACT.xml 
- 
- 
-{{  
-config(
-schema = 'Add your schema here',
---alias = ['S10_NJ_DMV_MTHLY_EXTRACT'],
---scenario = 'update',
-materialized = 'incremental',
-incremental_strategy = 'merge',
-unique_key = ['NJ_DMV_UMIS_MTH_BUILD_ID'],
-merge_cols = ['DMV_MAKE_OF_CAR'],
-source_pre_sql =[''],
-source_post_sql=[''],
-target_pre_sql =[],
-target_post_sql =[],
-table_prefix =[]
+
+
+
+
+
+- models/dmv_extract/sq_s10_nj_dmv_extract.sql
+
+WITH SQ_S10_NJ_DMV_EXTRACT AS (
+    SELECT 
+        row_number() over(order by POL_PK) AS source_record_id,
+        T_POL_ADDR_DIM_HST.STATE,
+        T_POL_ADDR_DIM_HST.CNTY,
+        T_POL_ADDR_DIM_HST.PSTL_CD,
+        T_POL_DIM_HST.PRE_CONV_CO_CD,
+        T_POL_ADDR_DIM_HST.ADDR_PK,
+        T_POL_ADDR_DIM_HST.PMRY_ADDR_FLG,
+        T_POL_ADDR_DIM_HST.HSE_NUM,
+        T_POL_DIM_HST.POL_PK,
+        T_POL_DIM_HST.POL_NUM,
+        -- Rest of your SELECT statement from the first file
+    FROM 
+        T_POL_ADDR_DIM_HST
+    JOIN 
+        T_POL_PTY_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK
+    JOIN 
+        T_POL_FLG_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_FLG_DIM_HST.POL_PK
+    JOIN 
+        T_POL_CT_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_CT_DIM_HST.POL_PK
+    JOIN 
+        T_POL_VEH_UNIT_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_VEH_UNIT_DIM_HST.POL_PK
+    JOIN 
+        T_POL_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+    WHERE 
+        RTRIM(T_POL_DIM_HST.PRCSG_GRP_CD) IN ('HP', 'PL')
+        -- Add other WHERE conditions from your SQL file
 )
-}}
+4. Create the Next Step: Lookup Transformation Model:
+The next step involves applying lookups and expressions as in the second file.
 
---parameters are not available for this mapping
+File: models/dmv_extract/exptrans.sql
 
-SQ_S10_NJ_DMV_MTHLY_EXTRACT as (
-        -- writting query for Source_qualifier function
-SELECT row_number() over (order by NJ_DMV_UMIS_MTH_BUILD_ID) AS source_record_id,
-               S10_NJ_DMV_MTHLY_EXTRACT.NJ_DMV_UMIS_MTH_BUILD_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_PK,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_NUM,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_SEQ_NUM,
-               S10_NJ_DMV_MTHLY_EXTRACT.ORIG_POL_PK,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_STATE_VRSN,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_STATE_EFF_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.ACCTG_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_STATE_STAT,
-               S10_NJ_DMV_MTHLY_EXTRACT.ROW_XPTN_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.POL_VRSN_TXN_TYP,
-               S10_NJ_DMV_MTHLY_EXTRACT.ROW_STAT,
-               S10_NJ_DMV_MTHLY_EXTRACT.RCD_ACTN_TYP_POL,
-               S10_NJ_DMV_MTHLY_EXTRACT.DATA_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.CORP_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.CO_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_PROD_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_POL_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.CO_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.PROD_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_CORP_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_CO_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.PRCSG_GRP_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.PROD_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.CUR_TERM_EFF_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.CUR_TERM_XPTN_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.CNCL_RSN,
-               S10_NJ_DMV_MTHLY_EXTRACT.CNCL_TYP,
-               S10_NJ_DMV_MTHLY_EXTRACT.CNCL_EFF_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.REINST_TYP,
-               S10_NJ_DMV_MTHLY_EXTRACT.REINST_EFF_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.REINST_RSN,
-               S10_NJ_DMV_MTHLY_EXTRACT.LAPSE_BEGIN_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.LAPSE_END_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.PLN_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_TRANS_TYPE,
-               S10_NJ_DMV_MTHLY_EXTRACT.VEH_UNIT_PK,
-               S10_NJ_DMV_MTHLY_EXTRACT.RCD_ACTN_TYP_VEH,
-               S10_NJ_DMV_MTHLY_EXTRACT.ORGL_EFF_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.VEH_TYP_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.VIN,
-               S10_NJ_DMV_MTHLY_EXTRACT.MODEL_YR,
-               S10_NJ_DMV_MTHLY_EXTRACT.MK,
-               S10_NJ_DMV_MTHLY_EXTRACT.STAT_MAKE_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.ADDR_PK,
-               S10_NJ_DMV_MTHLY_EXTRACT.PMRY_ADDR_FLG,
-               S10_NJ_DMV_MTHLY_EXTRACT.HSE_NUM,
-               S10_NJ_DMV_MTHLY_EXTRACT.ADDRESS1,
-               S10_NJ_DMV_MTHLY_EXTRACT.ADDRESS2,
-               S10_NJ_DMV_MTHLY_EXTRACT.ADDRESS3,
-               S10_NJ_DMV_MTHLY_EXTRACT.ADDRESS4,
-               S10_NJ_DMV_MTHLY_EXTRACT.CITY,
-               S10_NJ_DMV_MTHLY_EXTRACT.STATE,
-               S10_NJ_DMV_MTHLY_EXTRACT.CNTY,
-               S10_NJ_DMV_MTHLY_EXTRACT.PSTL_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.ZIP_FIRST5_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.ZIP_LAST4_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.INSD_PTY_PK_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_PTY_ID_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_FST_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_LST_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_MDL_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_SFX_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.BUS_NAM_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.PMRY_NAMD_INSD_FLG_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAMD_INSD_FLG_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.DRVR_FLG_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.DRVR_LIC_NUM_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.DRVR_LIC_STATE_POL_OWNER,
-               S10_NJ_DMV_MTHLY_EXTRACT.ASSOCN_TYP_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.INSD_PTY_PK_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.SRC_PTY_ID_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_FST_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_LST_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_MDL__PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAM_SFX_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.NAMD_INSD_FLG_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DRVR_FLG_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DRVR_LIC_NUM_PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DRVR_LIC_STATE__PRMRY_DRVR,
-               S10_NJ_DMV_MTHLY_EXTRACT.BATCH_ID,
-               S10_NJ_DMV_MTHLY_EXTRACT.CREATE_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.CREATED_BY,
-               S10_NJ_DMV_MTHLY_EXTRACT.BATCH_START_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.BATCH_END_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.RPRTG_PERIOD_START_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.RPRTG_PERIOD_END_DT,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_VIN,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_DRIVER_LICENSE_NUMBER,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_MAKE_OF_CAR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_YEAR_OF_CAR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_MODEL_OF_CAR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_INS_COMPANY_CD,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_OWNER_STREET_ADDR,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_OWNER_CITY,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_OWNER_STATE,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_OWNER_ZIP_CODE,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_TRANSACTION_TYPE_CODE,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_EFFECTIVE_DATE,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_CANCELLATION_DATE,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_DATE_STAMP,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_POLICY_NUMBER,
-               S10_NJ_DMV_MTHLY_EXTRACT.DMV_RESERVED,
-               LKP_VEH_MAK.MK AS lkp_MK,
-               LKP_VEH_MAK.STAT_MAKE_CD AS lkp_STAT_MAKE_CD
-          FROM S10_NJ_DMV_MTHLY_EXTRACT S10_NJ_DMV_MTHLY_EXTRACT
-          left join -- writting query for lookup function
- (
-                select MK,
-                       STAT_MAKE_CD,
-                       VIN,
-                       row_number() over(partition by VIN order by VIN) as rn -- Please review the order by columns
+sql
+Copy code
+-- models/dmv_extract/exptrans.sql
 
-                  FROM T_POL_VEH_UNIT_DIM_HST
-                 where (STAT_MAKE_CD IS NOT NULL OR MK IS NOT NULL)
-                   AND (RTRIM(LTRIM(STAT_MAKE_CD)) <> '' OR RTRIM(LTRIM(MK)) <> '')
-                 ORDER BY CASE WHEN STAT_MAKE_CD IS NULL THEN 1
-                               ELSE 0
-                                END,
-                          CASE WHEN MK IS NULL THEN 1
-                               ELSE 0
-                                END --
-qualify rn = 1
-               ) LKP_VEH_MAK
-            on LKP_VEH_MAK.VIN = S10_NJ_DMV_MTHLY_EXTRACT.VIN
-       ) ,
-EXPTRANS as (
-        -- writting query for expression function
-SELECT source_record_id,
-               NJ_DMV_UMIS_MTH_BUILD_ID,
-               lkp_MK AS MK_lkp,
-               lkp_STAT_MAKE_CD AS STAT_MAKE_CD_lkp,
-               IFF(STAT_MAKE_CD_lkp IS NULL or RTRIM(LTRIM(STAT_MAKE_CD_lkp)) = '',UPPER(RPAD(SUBSTR(RTRIM(LTRIM(MK_lkp)),1,5),5,' ')), UPPER(RPAD(SUBSTR(RTRIM(LTRIM(STAT_MAKE_CD_lkp)),1,5),5,' '))) AS DMV_MAKE_OF_CAR_out
-          FROM SQ_S10_NJ_DMV_MTHLY_EXTRACT
-       ) ,
-UPDTRANS as (
-        -- writting query for update strategy function
- SELECT EXPTRANS.source_record_id,
-               NJ_DMV_UMIS_MTH_BUILD_ID,
-               DMV_MAKE_OF_CAR_out,
-               MK_lkp,
-               STAT_MAKE_CD_lkp
-          FROM EXPTRANS
-       ) ,
+WITH EXPTRANS AS (
+    SELECT 
+        source_record_id,
+        NJ_DMV_UMIS_MTH_BUILD_ID,
+        lkp_MK AS MK_lkp,
+        lkp_STAT_MAKE_CD AS STAT_MAKE_CD_lkp,
+        IFF(STAT_MAKE_CD_lkp IS NULL OR RTRIM(LTRIM(STAT_MAKE_CD_lkp)) = '', 
+            UPPER(RPAD(SUBSTR(RTRIM(LTRIM(MK_lkp)), 1, 5), 5, ' ')),
+            UPPER(RPAD(SUBSTR(RTRIM(LTRIM(STAT_MAKE_CD_lkp)), 1, 5), 5, ' '))) AS DMV_MAKE_OF_CAR_out
+    FROM 
+        {{ ref('sq_s10_nj_dmv_extract') }}
+    -- Include the necessary joins
+)
+5. Final Transformation Model:
+Apply the final transformation and selection of the fields for the S10_NJ_DMV_MTHLY_EXTRACT.
 
-FINAL_SELECT_S10_NJ_DMV_MTHLY_EXTRACT AS(
-        -- writing query for target definition
-SELECT NJ_DMV_UMIS_MTH_BUILD_ID :: INTEGER AS NJ_DMV_UMIS_MTH_BUILD_ID,
-               trim(DMV_MAKE_OF_CAR_out) :: varchar(5) AS DMV_MAKE_OF_CAR
-          FROM UPDTRANS
-       ) SELECT *
-  FROM FINAL_SELECT_S10_NJ_DMV_MTHLY_EXTRACT;
+File: models/dmv_extract/final_select.sql
+
+sql
+Copy code
+-- models/dmv_extract/final_select.sql
+
+WITH FINAL_SELECT_S10_NJ_DMV_MTHLY_EXTRACT AS (
+    SELECT 
+        NJ_DMV_UMIS_MTH_BUILD_ID :: INTEGER AS NJ_DMV_UMIS_MTH_BUILD_ID,
+        TRIM(DMV_MAKE_OF_CAR_out) :: varchar(5) AS DMV_MAKE_OF_CAR
+    FROM 
+        {{ ref('exptrans') }}
+)
+
+SELECT * FROM FINAL_SELECT_S10_NJ_DMV_MTHLY_EXTRACT;
+6. Run and Test the Models:
+Once the models are created:
+
+Add the model definitions to your dbt_project.yml.
+
+Run the models using the following dbt commands:
+
+
+
+
+
+
+
+
