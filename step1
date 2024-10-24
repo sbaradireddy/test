@@ -2,3 +2,111 @@ RPAD(CASE
          WHEN HSE_NUM IS NOT NULL THEN UPPER(LTRIM(RTRIM(HSE_NUM))) || ' ' 
          ELSE ''
      END || UPPER(LTRIM(RTRIM(ADDRESS1))), 30, ' ') AS DMV_POLICY_OWNER_STREET_ADDR
+
+
+
+1. Check for Join Issues:
+Ensure that the missing POL_PK is present in all necessary tables and that the join conditions are correct. Since multiple tables are being joined, a missing or incorrect join condition can cause the record to be excluded from the result set.
+
+Run a simple query to check whether the record with the missing POL_PK exists in all the required tables, like this:
+
+sql
+Copy code
+SELECT 
+    T_POL_ADDR_DIM_HST.POL_PK AS addr_pol_pk,
+    T_POL_PTY_DIM_HST.POL_PK AS pty_pol_pk,
+    T_POL_FLG_DIM_HST.POL_PK AS flg_pol_pk,
+    T_POL_CT_DIM_HST.POL_PK AS ct_pol_pk,
+    T_POL_VEH_UNIT_DIM_HST.POL_PK AS veh_pol_pk,
+    T_POL_DIM_HST.POL_PK AS dim_pol_pk
+FROM 
+    T_POL_ADDR_DIM_HST
+LEFT JOIN 
+    T_POL_PTY_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK
+LEFT JOIN 
+    T_POL_FLG_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_FLG_DIM_HST.POL_PK
+LEFT JOIN 
+    T_POL_CT_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_CT_DIM_HST.POL_PK
+LEFT JOIN 
+    T_POL_VEH_UNIT_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_VEH_UNIT_DIM_HST.POL_PK
+LEFT JOIN 
+    T_POL_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
+WHERE 
+    T_POL_ADDR_DIM_HST.POL_PK = '<MISSING_POL_PK>';
+This query will help identify if the record exists in each table. If one or more of the tables does not have the corresponding POL_PK, that may explain why the record is missing.
+
+2. Check Filters in the WHERE Clause:
+Your query has several conditions in the WHERE clause that may be filtering out the record with the missing POL_PK. For example, these lines may be excluding it:
+
+sql
+Copy code
+RTRIM(T_Pol_Dim_Hst.PRCSG_GRP_CD) IN ('HP', 'PL') AND
+RTRIM(T_POL_DIM_HST.STATE_CD)='NJ' AND
+RTRIM(T_Pol_Dim_Hst.CO_CD) IN ('HPPREF', 'HPPROP', ...) AND
+RTRIM(T_Pol_Dim_Hst.CORP_CD) IN ('HIGHPOINT', 'Palisades') AND
+...
+Verify whether the missing POL_PK record satisfies all the conditions in the WHERE clause. You can check it by running:
+
+sql
+Copy code
+SELECT *
+FROM T_POL_DIM_HST
+WHERE POL_PK = '<MISSING_POL_PK>';
+If this query does not return the record, check which filter might be excluding it.
+
+3. Use NOT EXISTS Clause:
+Your query also has a NOT EXISTS condition that excludes records that match certain criteria:
+
+sql
+Copy code
+AND NOT EXISTS (
+    SELECT *
+    FROM ERM.T_ESS_SMOKETEST_POLICIES
+    WHERE ERM.T_ESS_SMOKETEST_POLICIES.STATE_CD=T_POL_DIM_HST.STATE_CD
+    AND ERM.T_ESS_SMOKETEST_POLICIES.POL_NUM=T_POL_DIM_HST.POL_NUM
+)
+This NOT EXISTS condition might be filtering out the record. You can check if the missing POL_PK record is being excluded by this condition by running:
+
+sql
+Copy code
+SELECT *
+FROM ERM.T_ESS_SMOKETEST_POLICIES
+WHERE STATE_CD = (SELECT STATE_CD FROM T_POL_DIM_HST WHERE POL_PK = '<MISSING_POL_PK>')
+  AND POL_NUM = (SELECT POL_NUM FROM T_POL_DIM_HST WHERE POL_PK = '<MISSING_POL_PK>');
+If this query returns results, it means that the NOT EXISTS condition is excluding the record.
+
+4. Check for Null Values in Key Fields:
+If any key fields used in joins or conditions (e.g., POL_PK, POL_NUM, STATE_CD) have null values in your data, this could also prevent the record from appearing in the final result. Null values do not participate in joins, so ensure there are no nulls in the critical fields for the missing record.
+
+Run the following query to check for null values in key fields for the missing POL_PK:
+
+sql
+Copy code
+SELECT POL_PK, POL_NUM, STATE_CD
+FROM T_POL_DIM_HST
+WHERE POL_PK = '<MISSING_POL_PK>'
+AND (POL_NUM IS NULL OR STATE_CD IS NULL);
+If you find null values, you'll need to correct them in the source data or handle them explicitly in your query using COALESCE or similar techniques.
+
+5. Validate Data Load Process:
+If you are pulling data from an external source (e.g., ETL process or staging tables), ensure that the record is loaded correctly into all the relevant tables. There might be an issue during data extraction or loading that is causing the record to be omitted.
+
+Summary of Steps:
+Check for join issues and ensure that the record exists in all necessary tables.
+Review the WHERE clause to verify whether any filters are excluding the record.
+Examine the NOT EXISTS clause to see if it is filtering out the record.
+Check for null values in key fields like POL_PK, POL_NUM, or STATE_CD.
+Investigate the data load process if applicable.
+After following these steps, you should be able to pinpoint the issue and determine why the record with the specific POL_PK is not being populated.
+
+
+
+
+
+
+
+
+
+
+
+ChatGPT can make mista
