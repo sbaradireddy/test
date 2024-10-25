@@ -1,4 +1,32 @@
 
+SELECT 
+    S10_NJ_DMV_MTHLY_EXTRACT.*,
+    LKP_VEH_MAK.MK AS lkp_mk,          -- Reference MK from the subquery
+    LKP_VEH_MAK.STAT_MAKE_CD           -- Reference STAT_MAKE_CD from the subquery
+FROM S10_NJ_DMV_MTHLY_EXTRACT
+LEFT JOIN (
+    SELECT MK,
+           STAT_MAKE_CD,
+           VIN,
+           ROW_NUMBER() OVER(PARTITION BY VIN ORDER BY VIN) AS rn
+    FROM T_POL_VEH_UNIT_DIM_HST
+    WHERE (STAT_MAKE_CD IS NOT NULL OR MK IS NOT NULL)
+      AND (RTRIM(LTRIM(STAT_MAKE_CD)) <> '' OR RTRIM(LTRIM(MK)) <> '')
+) LKP_VEH_MAK 
+ON LKP_VEH_MAK.VIN = S10_NJ_DMV_MTHLY_EXTRACT.VIN
+   AND LKP_VEH_MAK.rn = 1;             -- Filter for rn = 1 directly in the join condition
+
+
+
+
+
+
+
+
+
+
+
+
 WITH LKP_VEH_MAK AS (
     SELECT MK,
            STAT_MAKE_CD,
