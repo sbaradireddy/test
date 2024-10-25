@@ -1,4 +1,33 @@
 
+
+
+t join -- writting query for lookup function
+ (
+                select T_POL_VEH_UNIT_DIM_HST.MK,
+                       T_POL_VEH_UNIT_DIM_HST.STAT_MAKE_CD,
+                       VIN,
+                       row_number() over(partition by VIN order by VIN) as rn -- Please review the order by columns
+
+                  FROM CDWQA.DWADMN.T_POL_VEH_UNIT_DIM_HST
+                  where (STAT_MAKE_CD IS NOT NULL OR MK IS NOT NULL)
+                   AND (RTRIM(LTRIM(STAT_MAKE_CD)) <> '' OR RTRIM(LTRIM(MK)) <> '')
+                 ORDER BY CASE WHEN STAT_MAKE_CD IS NULL THEN 1
+                               ELSE 0
+                                END,
+                          CASE WHEN MK IS NULL THEN 1
+                               ELSE 0
+                                END --
+                 qualify rn = 1
+               ) LKP_VEH_MAK
+            on LKP_VEH_MAK.VIN = SQ_S10_NJ_DMV_EXTRACT.VIN
+
+
+
+
+
+
+
+
 t join -- writting query for lookup function
  (
                 select T_POL_VEH_UNIT_DIM_HST.MK,
