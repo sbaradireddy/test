@@ -1,54 +1,20 @@
+left join -- writting query for lookup function
+ (
+                select MK,
+                       STAT_MAKE_CD,
+                       VIN,
+                       row_number() over(partition by VIN order by VIN) as rn -- Please review the order by columns
 
-SELECT 
-    addr.POL_PK AS addr_pol_pk,
-    pty.POL_PK AS pty_pol_pk,
-    flg.POL_PK AS flg_pol_pk,
-    ct.POL_PK AS ct_pol_pk,
-    veh.POL_PK AS veh_pol_pk,
-    dim.POL_PK AS dim_pol_pk
-FROM 
-    CDWQA.DWADMN.T_POL_ADDR_DIM_HST addr
-LEFT JOIN 
-    CDWQA.DWADMN.T_POL_PTY_DIM_HST pty ON addr.POL_PK = pty.POL_PK
-LEFT JOIN 
-    CDWQA.DWADMN.T_POL_FLG_DIM_HST flg ON addr.POL_PK = flg.POL_PK
-LEFT JOIN 
-    CDWQA.DWADMN.T_POL_CT_DIM_HST ct ON addr.POL_PK = ct.POL_PK
-LEFT JOIN 
-    CDWQA.DWADMN.T_POL_VEH_UNIT_DIM_HST veh ON addr.POL_PK = veh.POL_PK
-LEFT JOIN 
-    CDWQA.DWADMN.T_POL_DIM_HST dim ON addr.POL_PK = dim.POL_PK
-WHERE 
-    addr.POL_PK = 83668608;
-
-
-
-
-
-
-
-
-
-
-
-  SELECT 
-    CDWQA.DWADMN.T_POL_ADDR_DIM_HST.POL_PK AS addr_pol_pk,
-    CDWQA.DWADMN.T_POL_PTY_DIM_HST.POL_PK AS pty_pol_pk,
-    CDWQA.DWADMN.T_POL_FLG_DIM_HST.POL_PK AS flg_pol_pk,
-    CDWQA.DWADMN.T_POL_CT_DIM_HST.POL_PK AS ct_pol_pk,
-    CDWQA.DWADMN.T_POL_VEH_UNIT_DIM_HST.POL_PK AS veh_pol_pk,
-    CDWQA.DWADMN.T_POL_DIM_HST.POL_PK AS dim_pol_pk
-FROM 
-    CDWQA.DWADMN.T_POL_DIM_HST
-LEFT JOIN 
-    T_POL_PTY_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_PTY_DIM_HST.POL_PK
-LEFT JOIN 
-    T_POL_FLG_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_FLG_DIM_HST.POL_PK
-LEFT JOIN 
-    T_POL_CT_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_CT_DIM_HST.POL_PK
-LEFT JOIN 
-    T_POL_VEH_UNIT_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_VEH_UNIT_DIM_HST.POL_PK
-LEFT JOIN 
-    T_POL_DIM_HST ON T_POL_ADDR_DIM_HST.POL_PK = T_POL_DIM_HST.POL_PK
-WHERE 
-    T_POL_ADDR_DIM_HST.POL_PK = 83668608
+                  FROM T_POL_VEH_UNIT_DIM_HST
+                 where (STAT_MAKE_CD IS NOT NULL OR MK IS NOT NULL)
+                   AND (RTRIM(LTRIM(STAT_MAKE_CD)) <> '' OR RTRIM(LTRIM(MK)) <> '')
+                 ORDER BY CASE WHEN STAT_MAKE_CD IS NULL THEN 1
+                               ELSE 0
+                                END,
+                          CASE WHEN MK IS NULL THEN 1
+                               ELSE 0
+                                END --
+qualify rn = 1
+               ) LKP_VEH_MAK
+            on LKP_VEH_MAK.VIN = S10_NJ_DMV_MTHLY_EXTRACT.VIN
+       ) 
