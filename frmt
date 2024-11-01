@@ -1,3 +1,47 @@
+
+
+
+EXP_HEADER AS (
+    -- Writing query for expression function
+    SELECT 
+        SQ_NJ_DMV_MTHLY_MERGE_HEADER.source_record_id,
+        SQ_NJ_DMV_MTHLY_MERGE_HEADER.DMV_INS_COMPANY_CD,
+        SQ_NJ_DMV_MTHLY_MERGE_HEADER.DMV_ORIG_CYCLE_DUE_DATE,
+        exp_CHANGE_DATE_FORMAT.VERSION_NBR,
+        SQ_NJ_DMV_MTHLY_MERGE_HEADER.ROW_ORIGIN
+    FROM 
+        SQ_NJ_DMV_MTHLY_MERGE_HEADER
+    INNER JOIN 
+        exp_CHANGE_DATE_FORMAT 
+    ON 
+        SQ_NJ_DMV_MTHLY_MERGE_HEADER.source_record_id = exp_CHANGE_DATE_FORMAT.source_record_id
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 exp_CHANGE_DATE_FORMAT AS (
     -- Writing query for expression function
     SELECT 
