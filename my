@@ -1,3 +1,46 @@
+EXP_TRAILER AS (
+    -- Writing query for expression function
+    SELECT 
+        source_record_id,
+        TOTAL_NEW_POLICIES_OUT AS TOTAL_NEW_POLICIES_V,  -- Use the correct alias
+        OUT_DMV_TRANSACTION_TYPE_CODE,
+        TOTAL_CANCELLED_POLICIES_OUT AS in_TOTAL_CANCELLED_POLICIES,
+        DMV_INS_COMPANY_CD,
+        DMV_TIME_STAMP,
+        DMV_DATE_STAMP,
+        FILLER,
+        DMV_RECORD_NAME,
+        TOTAL_RECORDS_COUNT_OUT,  -- Use the correct alias
+        
+        -- Check for NULL and handle appropriately
+        IFF(in_TOTAL_CANCELLED_POLICIES IS NULL, 0, in_TOTAL_CANCELLED_POLICIES) AS TOTAL_CANCELLED_POLICIES,
+        
+        -- Construct TRAILER field by concatenating fields
+        DMV_RECORD_NAME || DMV_INS_COMPANY_CD || DMV_TIME_STAMP || DMV_DATE_STAMP || 
+        LPAD(TOTAL_RECORDS_COUNT_OUT, 8, '0') || LPAD(TOTAL_NEW_POLICIES_V, 8, '0') || 
+        LPAD(TOTAL_CANCELLED_POLICIES, 8, '0') || FILLER AS TRAILER,
+        3 AS SORT_ORDER
+    FROM AGG_NJ_DMV_MTHLY_MERGE_TRAILER_FF
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 AGG_NJ_DMV_MTHLY_MERGE_TRAILER_FF AS (
     -- Writing query for Aggregator function
     SELECT 
