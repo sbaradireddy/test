@@ -1,0 +1,22 @@
+SELECT 
+    DMV_INS_COMPANY_CD, 
+    REPLACE(
+        TO_VARCHAR(
+            MAX(
+                TRY_TO_DATE(
+                    SUBSTR(DMV_ORIG_CYCLE_DUE_DATE, 1, 2) || '-' || 
+                    SUBSTR(DMV_ORIG_CYCLE_DUE_DATE, 3, 2) || '-' || 
+                    SUBSTR(DMV_ORIG_CYCLE_DUE_DATE, 5, 4), 
+                    'MM-DD-YYYY'
+                )
+            )
+        ), 
+        '-', ''
+    ) AS DMV_ORIG_CYCLE_DUE_DATE, 
+    ROW_ORIGIN 
+FROM 
+    BURRPT.NJ_DMV_MTHLY_MERGE_HEADER_DW
+WHERE 
+    DMV_INS_COMPANY_CD IN (4840, 4876, 4875, 4895, 4946, 4927)
+GROUP BY 
+    DMV_INS_COMPANY_CD, ROW_ORIGIN;
