@@ -1,3 +1,75 @@
+AGG_NJ_DMV_MTHLY_MERGE_TRAILER_FF AS (
+    -- Writing query for Aggregator function
+    SELECT 
+        TOTAL_NEW_POLICIES,
+        OUT_DMV_TRANSACTION_TYPE_CODE,
+        DMV_INS_COMPANY_CD,
+        DMV_TIME_STAMP,
+        DMV_DATE_STAMP,
+        FILLER,
+        source_record_id,
+        TOTAL_CANCELLED_POLICIES,
+        TOTAL_RECORDS_COUNT,
+        DMV_RECORD_NAME,
+        
+        -- Use window functions without COALESCE for initial aggregation
+        MAX(CASE WHEN OUT_DMV_TRANSACTION_TYPE_CODE = 'N' THEN TOTAL_NEW_POLICIES END) 
+            OVER (PARTITION BY DMV_RECORD_NAME) AS TOTAL_NEW_POLICIES_OUT_RAW,
+            
+        MAX(CASE WHEN OUT_DMV_TRANSACTION_TYPE_CODE = 'C' THEN TOTAL_CANCELLED_POLICIES END) 
+            OVER (PARTITION BY DMV_RECORD_NAME) AS TOTAL_CANCELLED_POLICIES_OUT_RAW,
+        
+        MAX(TOTAL_RECORDS_COUNT) 
+            OVER (PARTITION BY DMV_RECORD_NAME) AS TOTAL_RECORDS_COUNT_OUT_RAW,
+        
+        ROW_NUMBER() OVER (
+            PARTITION BY DMV_RECORD_NAME 
+            ORDER BY TOTAL_NEW_POLICIES DESC, OUT_DMV_TRANSACTION_TYPE_CODE DESC, 
+            DMV_INS_COMPANY_CD DESC, DMV_TIME_STAMP DESC, DMV_DATE_STAMP DESC, FILLER DESC
+        ) AS rn
+        
+    FROM EXP_NJ_DMV_MTHLY_MERGE_TRAILER_FF
+    QUALIFY rn = 1
+),
+
+-- Wrapping the COALESCE logic after window aggregation
+AGG_NJ_DMV_MTHLY_MERGE_TRAILER_FINAL AS (
+    SELECT 
+        source_record_id,
+        DMV_INS_COMPANY_CD,
+        DMV_TIME_STAMP,
+        DMV_DATE_STAMP,
+        FILLER,
+        TOTAL_RECORDS_COUNT,
+        DMV_RECORD_NAME,
+        
+        -- Use COALESCE here after aggregation
+        COALESCE(TOTAL_NEW_POLICIES_OUT_RAW, 0) AS TOTAL_NEW_POLICIES_OUT,
+        COALESCE(TOTAL_CANCELLED_POLICIES_OUT_RAW, 0) AS TOTAL_CANCELLED_POLICIES_OUT,
+        COALESCE(TOTAL_RECORDS_COUNT_OUT_RAW, 0) AS TOTAL_RECORDS_COUNT_OUT
+        
+    FROM AGG_NJ_DMV_MTHLY_MERGE_TRAILER_FF
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 -- Step 1: Initialize base values for the trailer section
 INIT_TRAILER_VALUES AS (
     SELECT 
