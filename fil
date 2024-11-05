@@ -1,3 +1,39 @@
+EXP_TRAILER AS (
+    SELECT 
+        source_record_id,
+        TOTAL_NEW_POLICIES,
+        OUT_DMV_TRANSACTION_TYPE_CODE,
+        TOTAL_CANCELLED_POLICIES,
+        DMV_INS_COMPANY_CD,
+        DMV_TIME_STAMP,
+        DMV_DATE_STAMP,
+        FILLER,
+        DMV_RECORD_NAME,
+        TOTAL_RECORDS_COUNT,
+        
+        -- Check for NULL and handle appropriately
+        IFF(TOTAL_CANCELLED_POLICIES IS NULL, 0, TOTAL_CANCELLED_POLICIES) AS TOTAL_CANCELLED_POLICIES,
+
+        -- Construct TRAILER field by concatenating fields
+        DMV_RECORD_NAME || DMV_INS_COMPANY_CD || DMV_TIME_STAMP || DMV_DATE_STAMP || 
+        LPAD(TOTAL_RECORDS_COUNT, 8, '0') || LPAD(TOTAL_NEW_POLICIES, 8, '0') || 
+        LPAD(TOTAL_CANCELLED_POLICIES, 8, '0') || FILLER AS TRAILER,  -- Ensuring TRAILER is created here
+        3 AS SORT_ORDER
+    FROM AGG_NJ_DMV_MTHLY_MERGE_TRAILER_FF  -- Ensure the source is correct and has all needed fields
+),
+
+
+
+
+
+
+
+
+
+
+
+
+
 WITH SQ_NJ_DMV_MTHLY_MERGE_HEADER_temp AS (
     -- Writing query for Source_qualifier override query
  SELECT 
