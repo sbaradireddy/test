@@ -1,9 +1,0 @@
-CASE 
-    WHEN OUT_DMV_INS_COMPANY_CD = '4895' THEN 'nj_dmv_mthly_merge_data1_ff_DW_4895.txt'
-    WHEN OUT_DMV_INS_COMPANY_CD = '4875' THEN 'nj_dmv_mthly_merge_data2_ff_DW_4875.txt'
-    WHEN OUT_DMV_INS_COMPANY_CD = '4876' THEN 'nj_dmv_mthly_merge_data2_ff_DW_4876.txt'
-    WHEN OUT_DMV_INS_COMPANY_CD = '4877' THEN 'nj_dmv_mthly_merge_data2_ff_DW_4877.txt'
-    WHEN OUT_DMV_INS_COMPANY_CD = '4878' THEN 'nj_dmv_mthly_merge_data2_ff_DW_4878.txt'
-    WHEN OUT_DMV_INS_COMPANY_CD = '4879' THEN 'nj_dmv_mthly_merge_data2_ff_DW_4879.txt'
-    ELSE 'default_filename.txt'  -- Optional default case for unmatched values
-END AS FILENAME
