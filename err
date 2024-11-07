@@ -1,0 +1,6 @@
+Database Error in model fwf_nj_dmv_mthly_merge_files (models/burrpt_nj_dmv/wfl_s_m_merge_file_create/m_merge_file_create/fwf_nj_dmv_mthly_merge_files.sql)
+  100078 (22000): String '19XFC2F53GE245036  M16642790062565HOND 2016     4895 128 HOBART ST
+            ...' is too long and would be truncated in 'CONCAT'
+  compiled code at target/run/data_services_etl_rdm/models/burrpt_nj_dmv/wfl_s_m_merge_file_create/m_merge_file_create/fwf_nj_dmv_mthly_merge_files.sql
+15:31:48
+15:31:48 Done. PASS=0 WARN=0 ERROR=1 SKIP=0 TOTAL=1
