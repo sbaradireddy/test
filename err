@@ -1,3 +1,35 @@
+burrpt_nj_dmv:
+  wfl_nj_dmv_monthly_extract:
+    +tags: wfl_nj_dmv_monthly_extract
+    m_nj_dmv_mthly_extract_subm_hist:
+      +tags:
+        - m_nj_dmv_mthly_extract_subm_hist
+    m_s10_nj_dmv_all_extract:
+      +tags:
+        - m_s10_nj_dmv_all_extract
+    m_s20_nj_dmv_extract_filter:
+      +tags:
+        - m_s20_nj_dmv_extract_filter
+  wfl_s_m_merge_file_create:
+    +tags: wfl_s_m_merge_file_create
+  m_mege_file_create:
+    +tags:
+      - m_mege_file_create
+  wfl_s_m_merge_file_splitter:
+    +tags: wfl_s_m_merge_file_splitter
+  m_merge_file_splitter_mtrx:
+    +tags:
+      - m_merge_file_splitter_mtrx
+
+
+
+
+
+
+
+
+
+
         # Applies to all files under models/burrpt_nj_dmv/      
     burrpt_nj_dmv:
       wfl_nj_dmv_monthly_extract:
