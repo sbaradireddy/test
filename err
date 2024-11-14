@@ -1,6 +1,23 @@
-Database Error in model fwf_nj_dmv_mthly_merge_files (models/burrpt_nj_dmv/wfl_s_m_merge_file_create/m_merge_file_create/fwf_nj_dmv_mthly_merge_files.sql)
-  100078 (22000): String '19XFC2F53GE245036  M16642790062565HOND 2016     4895 128 HOBART ST
-            ...' is too long and would be truncated in 'CONCAT'
-  compiled code at target/run/data_services_etl_rdm/models/burrpt_nj_dmv/wfl_s_m_merge_file_create/m_merge_file_create/fwf_nj_dmv_mthly_merge_files.sql
-15:31:48
-15:31:48 Done. PASS=0 WARN=0 ERROR=1 SKIP=0 TOTAL=1
+        # Applies to all files under models/burrpt_nj_dmv/      
+    burrpt_nj_dmv:
+      wfl_nj_dmv_monthly_extract:
+         +tags: wfl_nj_dmv_monthly_extract
+         m_nj_dmv_mthly_extract_subm_hist:
+          +tags:
+          - m_nj_dmv_mthly_extract_subm_hist
+         m_s10_nj_dmv_all_extract:
+          +tags:
+          - m_s10_nj_dmv_all_extract
+         m_s20_nj_dmv_extract_filter:
+          +tags:
+          - m_s20_nj_dmv_extract_filter 
+      wfl_s_m_merge_file_create:
+       +tags:wfl_s_m_merge_file_create
+    m_mege_file_create:
+    +tags:
+    - m_mege_file_create 
+    wfl_s_m_merge_file_splitter:
+     +tags:wfl_s_m_merge_file_splitter
+    m_merge_file_splitter_mtrx:
+      +tags:
+      - m_merge_file_splitter_mtrx
