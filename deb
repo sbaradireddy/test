@@ -1,72 +1,19 @@
-with EXP_NJ_DMV_MTHLY_MERGE_DATA as 
-(
-select row_number() over(order by DMV_VIN) AS source_record_id,
-               DMV_POLICY_OWNER_ZIP_CODE,
-               DMV_POLICY_NUMBER,
-               DMV_DATE_STAMP,
-              CURRENT_TIMESTAMP AS CREATE_DATE,
-              '' AS  MAPPING_NAME,
-               DMV_POLICY_EFFECTIVE_DATE,
-               DMV_TRANSACTION_TYPE_CODE,
-               DMV_POLICY_OWNER_STATE,
-               DMV_MODEL_OF_CAR,
-              '2' AS  DMV_REC_TYPE_SORT_ORDER,
-               DMV_POLICY_CANCELLATION_DATE,
-               DMV_DRIVER_LICENSE_NUMBER,
-               DMV_POlICY_OWNER_CITY,
-               DMV_YEAR_OF_CAR,
-               DMV_MAKE_OF_CAR,
-               DMV_RESERVED,
-               DMV_POLICY_OWNER_STREET_ADDR,
-               DMV_VIN,
-               TO_CHAR(SYSDATE(),'MMDDYYYY') AS DMV_ORIG_DUE_DATE_OUT,
-               'W' AS ROW_ORIGIN,
-               SQ_nj_dmv_mthly_generic_ff.DMV_INS_COMPANY_CD,
-               LKP_VERSION_NUMBER.DMV_INS_COMPANY_CD AS lkp_DMV_INS_COMPANY_CD,
-               LKP_VERSION_NUMBER.DMV_ORIG_CYCLE_DUE_DATE,
-               LKP_VERSION_NUMBER.ROW_ORIGIN AS lkp_ROW_ORIGIN,
-               LKP_VERSION_NUMBER.VERSION_NBR
-
-FROM RDMDEV.RRM.nj_dmv_mthly_submission_dw  SQ_nj_dmv_mthly_generic_ff
-
-left join -- writting query for lookup function
- (
-                select NJ_DMV_MTHLY_MERGE_HEADER_DW.DMV_INS_COMPANY_CD,
-                       NJ_DMV_MTHLY_MERGE_HEADER_DW.DMV_ORIG_CYCLE_DUE_DATE,
-                       NJ_DMV_MTHLY_MERGE_HEADER_DW.ROW_ORIGIN,
-                       NJ_DMV_MTHLY_MERGE_HEADER_DW.VERSION_NBR,
-                       row_number() over(partition by NJ_DMV_MTHLY_MERGE_HEADER_DW.DMV_INS_COMPANY_CD, NJ_DMV_MTHLY_MERGE_HEADER_DW.DMV_ORIG_CYCLE_DUE_DATE,
-                        NJ_DMV_MTHLY_MERGE_HEADER_DW.ROW_ORIGIN order by NJ_DMV_MTHLY_MERGE_HEADER_DW.DMV_INS_COMPANY_CD, 
-                       NJ_DMV_MTHLY_MERGE_HEADER_DW.DMV_ORIG_CYCLE_DUE_DATE,NJ_DMV_MTHLY_MERGE_HEADER_DW.ROW_ORIGIN DESC) as rn 
-                  FROM RDMDEV.BURRPT.nj_dmv_mthly_merge_header_dw  NJ_DMV_MTHLY_MERGE_HEADER_DW qualify rn = 1
-                  --FROM BURRPT.NJ_DMV_MTHLY_MERGE_HEADER_DW qualify rn = 1
-               ) LKP_VERSION_NUMBER
-            on LKP_VERSION_NUMBER.DMV_INS_COMPANY_CD=SQ_nj_dmv_mthly_generic_ff.DMV_INS_COMPANY_CD
-           AND LKP_VERSION_NUMBER.DMV_ORIG_CYCLE_DUE_DATE=TO_CHAR(SYSDATE(),'MMDDYYYY')
-           AND LKP_VERSION_NUMBER.ROW_ORIGIN='W'
-           )
-       select 
---TO_DATE(DMV_ORIG_DUE_DATE_OUT, 'yyyy-mm-dd') as DMV_ORIG_DUE_DATE,
-DMV_ORIG_DUE_DATE_OUT :: DATE AS DMV_ORIG_DUE_DATE,
-               DMV_REC_TYPE_SORT_ORDER :: INTEGER AS DMV_REC_TYPE_SORT_ORDER,
-               trim(ROW_ORIGIN) :: varchar(1) AS ROW_ORIGIN,
-               VERSION_NBR :: INTEGER AS VERSION_NBR,
-               trim(DMV_VIN) :: varchar(19) AS DMV_VIN,
-               trim(DMV_DRIVER_LICENSE_NUMBER) :: varchar(15) AS DMV_DRIVER_LICENSE_NUMBER,
-               trim(DMV_MAKE_OF_CAR) :: varchar(5) AS DMV_MAKE_OF_CAR,
-               trim(DMV_YEAR_OF_CAR) :: varchar(4) AS DMV_YEAR_OF_CAR,
-               trim(DMV_MODEL_OF_CAR) :: varchar(5) AS DMV_MODEL_OF_CAR,
-               trim(DMV_INS_COMPANY_CD) :: varchar(4) AS DMV_INS_COMPANY_CD,
-               trim(DMV_POLICY_OWNER_STREET_ADDR) :: varchar(30) AS DMV_POLICY_OWNER_STREET_ADDR,
-               trim(DMV_POLICY_OWNER_CITY) :: varchar(20) AS DMV_POICY_OWNER_CITY,
-               trim(DMV_POLICY_OWNER_STATE) :: varchar(2) AS DMV_POLICY_OWNER_STATE,
-               trim(DMV_POLICY_OWNER_ZIP_CODE) :: varchar(9) AS DMV_POLICY_OWNER_ZIP_CODE,
-               trim(DMV_TRANSACTION_TYPE_CODE) :: varchar(1) AS DMV_TRANSACTION_TYPE_CODE,
-               trim(DMV_POLICY_EFFECTIVE_DATE) :: varchar(8) AS DMV_POLICY_EFFECTIVE_DATE,
-               trim(DMV_POLICY_CANCELLATION_DATE) :: varchar(8) AS DMV_POLICY_CANCELLATION_DATE,
-               trim(DMV_DATE_STAMP) :: varchar(8) AS DMV_DATE_STAMP,
-               trim(DMV_POLICY_NUMBER) :: varchar(30) AS DMV_POLICY_NUMBER,
-               trim(DMV_RESERVED) :: varchar(32) AS DMV_RESERVED,
-               CREATE_DATE :: DATE AS CREATE_DATE,
-               trim(MAPPING_NAME) :: varchar(30) AS MAPPING_NAME
- from EXP_NJ_DMV_MTHLY_MERGE_DATA
+SELECT SQ_nj_dmv_mthly_generic_ff.DMV_INS_COMPANY_CD,
+       LKP_VERSION_NUMBER.DMV_INS_COMPANY_CD AS lkp_DMV_INS_COMPANY_CD,
+       LKP_VERSION_NUMBER.DMV_ORIG_CYCLE_DUE_DATE,
+       LKP_VERSION_NUMBER.ROW_ORIGIN,
+       LKP_VERSION_NUMBER.VERSION_NBR
+FROM RDMDEV.RRM.nj_dmv_mthly_submission_dw SQ_nj_dmv_mthly_generic_ff
+LEFT JOIN (
+    select DMV_INS_COMPANY_CD,
+           DMV_ORIG_CYCLE_DUE_DATE,
+           ROW_ORIGIN,
+           VERSION_NBR,
+           row_number() over(partition by DMV_INS_COMPANY_CD, DMV_ORIG_CYCLE_DUE_DATE, ROW_ORIGIN
+                             order by DMV_INS_COMPANY_CD, DMV_ORIG_CYCLE_DUE_DATE, ROW_ORIGIN DESC) as rn 
+    from RDMDEV.BURRPT.nj_dmv_mthly_merge_header_dw
+    qualify rn = 1
+) LKP_VERSION_NUMBER
+ON LKP_VERSION_NUMBER.DMV_INS_COMPANY_CD = SQ_nj_dmv_mthly_generic_ff.DMV_INS_COMPANY_CD
+AND LKP_VERSION_NUMBER.DMV_ORIG_CYCLE_DUE_DATE = TO_CHAR(SYSDATE(), 'MMDDYYYY')
+AND LKP_VERSION_NUMBER.ROW_ORIGIN = 'W'
