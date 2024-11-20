@@ -1,9 +1,7 @@
- CASE
-      WHEN POL_PK = 234 AND ROW_STAT = 'C' THEN 'C' -- Explicitly prioritize C
-      WHEN DMV_TRANS_TYPE = 'NB' AND SUBSTR(POL_VRSN_TXN_TYP, 1, 2) != 'EN' THEN 'N'
-      WHEN DMV_TRANS_TYPE = 'RS' AND REINST_TYP = 'WITH LAPSE' THEN 'N'
-      WHEN DMV_TRANS_TYPE = 'CN' AND ROW_STAT = 'C' THEN 'C'
-      WHEN DMV_TRANS_TYPE = 'CN' AND ROW_STAT = 'H' THEN 'H'
-      ELSE ROW_STAT -- Preserve original value if no condition matches
-    END AS FINAL_ROW_STAT
-FROM EXP_PRE_FILTER;
+CASE
+      WHEN DMV_TRANS_TYPE = 'NB' AND SUBSTR(POL_VRSN_TXN_TYP, 1, 2) != 'EN' THEN 'Condition1'
+      WHEN DMV_TRANS_TYPE = 'RS' AND REINST_TYP = 'WITH LAPSE' THEN 'Condition2'
+      WHEN DMV_TRANS_TYPE = 'CN' AND ROW_STAT = 'C' THEN 'Condition3'
+      WHEN DMV_TRANS_TYPE = 'CN' AND ROW_STAT = 'H' THEN 'Condition4'
+      ELSE 'Default'
+    END AS CONDITION_TRIGGERED
