@@ -16,11 +16,13 @@ CASE
     WHEN DMV_TRANS_TYPE = 'RS' 
          AND REINST_TYP = 'REINSTATE' 
          AND ROW_STAT = 'C' 
-         AND COALESCE(POL_PK_CANCEL, 0) = 0 
-         AND POL_PK > 0 
+         AND (POL_PK_CANCEL IS NULL OR POL_PK_CANCEL = 0) 
+         AND POL_PK_CANCEL != POL_PK 
     THEN 'N'
     WHEN DMV_TRANS_TYPE = 'AV' 
          AND COALESCE(POL_PK_ADD_VEH, -1) = POL_PK 
+         AND POL_PK_ADD_VEH != 0 
+         AND DMV_VIN IS NOT NULL 
     THEN 'N'
     ELSE 'Y'
 END AS FILTER_OUT_IND
