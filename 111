@@ -1,4 +1,37 @@
 
+             IFF( YR_BLT IS NULL,'  ', IFF(RTRIM(UNIT_TYPE) ='HO_4' OR RTRIM(UNIT_TYPE) ='HO_6','  ', 
+               IFF( YR_BLT :: INT  <1901, '99', 
+               IFF( YR_BLT :: INT  >=1901 AND  YR_BLT :: INT  <=1959 , SUBSTR(YR_BLT,3,2), 
+               IFF( YR_BLT :: INT  >=1960 AND  YR_BLT :: INT  <=1998 , SUBSTR(YR_BLT,3,2), 
+               IFF( YR_BLT :: INT  =1999, 'NN', IFF( YR_BLT :: INT  =2000, 'TT', 
+               IFF( YR_BLT :: INT  >=2001 AND  YR_BLT :: INT  <=2009, 'T' || SUBSTR(YR_BLT,4,1), 
+               IFF( YR_BLT :: INT  >=2010 AND  YR_BLT :: INT  <=2019, 'A' || SUBSTR(YR_BLT,4,1),
+               IFF( YR_BLT :: INT  >=2020 AND  YR_BLT :: INT  <=2029, 'B' || SUBSTR(YR_BLT,4,1),
+               IFF( YR_BLT :: INT  >=2030 AND  YR_BLT :: INT  <=2039, 'C' || SUBSTR(YR_BLT,4,1),
+               IFF( YR_BLT :: INT  >=2040 AND  YR_BLT :: INT  <=2049, 'D' || SUBSTR(YR_BLT,4,1), 
+               IFF( YR_BLT :: INT  >=2050 AND  YR_BLT :: INT  <=2059, 'E' || SUBSTR(YR_BLT,4,1),
+               IFF( YR_BLT :: INT  >=2060 AND  YR_BLT :: INT  <=2069, 'F' || SUBSTR(YR_BLT,4,1), 
+               IFF( YR_BLT :: INT  >=2070 AND  YR_BLT :: INT  <=2079, 'G' || SUBSTR(YR_BLT,4,1), 
+               IFF( YR_BLT :: INT  >=2080 AND  YR_BLT :: INT  <=2089, 'H' || SUBSTR(YR_BLT,4,1), 
+               IFF( YR_BLT :: INT  >=2090 AND  YR_BLT :: INT  <=2099, 'I' || SUBSTR(YR_BLT,4,1)))))))))))))))))) AS ISO_YEAR_OF_CONSTRUCTION_CODE,
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 IFF(
     RTRIM(STATE_CODE) = 'NH',
     DECODE(
