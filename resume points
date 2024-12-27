@@ -1,0 +1,43 @@
+- Design, develop, test, deploy, and maintain enterprise-level applications using the Snowflake platform.
+- Collaborate with stakeholders to gather requirements and deliver data-driven solutions.
+- Build ELT pipelines (batch and streaming) in Snowflake.
+- Utilize DBT for data transformations within Snowflake.
+- Handle large and complex datasets (JSON, ORC, PARQUET, CSV) from sources like AWS S3 .
+- Implement Snowflake features such as Snowpipe, Streams, Tasks, Cloning, Time Travel, Data Sharing, and Data Replication.
+- Perform performance tuning and set up resource monitors in Snowflake.
+- Apply Snowflake modeling for roles, databases, and schemas over 3 years.
+- Optimize SQL performance, query tuning, and database tuning in Snowflake.
+- Experience with ETL tools such as ODI and Informatica.
+- Manage Snowflake architecture, processing, and administration.
+
+
+
+comments effectively.
+- Developed Star and Snowflake Data Models in ER Studio, optimizing data organization and accessibility for decision-making.
+- Created real-time data pipelines with Kafka producers and Spark streaming, ensuring swift data consumption and processing.
+- Utilized Sqoop for seamless data importation into HDFS, executing transformations through Hive and MapReduce efficiently.
+- Executed SQL tuning for optimizing queries, efficiently extracting data from extensive datasets involving multiple table joins.
+- Implemented quality assurance for encrypted data marts, ensuring data integrity and secure file transfers to client servers.
+- Deployed automated Airflow workflows to streamline data management processes, boosting operational efficiency by 40%.
+- Implemented Data Lineage and Source-to-Target Mapping transformations for precise data tracking and structuring.
+- Developed Spark applications using Python and PySpark to handle large-scale data processing tasks effectively.
+- Applied AWS Glue Catalog for metadata management, ensuring consistent and up-to-date schema information across data sources.
+
+ 
+Principal Cloud Development/MLOps Engineer
+BMO · Full-timeNov 2022 - Present · 2 yrs 2 mosUnited States · Remote
+• Worked as a lead engineer to research, test and build automated pipelines for
+Data Scientists to train, build and deploy models in AWS using SageMaker, Step
+Functions, Lambda, S3 and other API driven services that are highly available,
+scalable and efficient with cost optimization in mind.
+• Deployed endpoints for GenAI/LLM models (ex: Llama2) for inference using
+SageMaker and provide guidance to Data Scientists on how to utilize MLOps
+platform.
+• Assist Data Scientists by custom building python libraries to improve the ML model
+deployment process based on many ML libraries such as tensorflow, XGBoost,
+pytorch, ‘scikit-learn’ and etc.
+• Work with Operations/Security team to set appropriate policies and
+configuration in AWS for the MLOps platform to better control user
+access/management.
+• Constantly research and experiment AI/ML/LLM technologies and tools to make
+improvements to overall MLOps workflow.
