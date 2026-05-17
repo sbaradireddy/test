@@ -1,3 +1,7 @@
+TypeError: Invalid argument, not a string or column: 0.0012722015380859375 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
+
+
+
 # ==============================================================================
 # GLUE NOTEBOOK
 # Goal: Read JSON files → produce one CSV per schema type showing
