@@ -1,4 +1,29 @@
-# ==============================================================================
+#
+import traceback
+try:
+    entries  = by_schema[schema_types[0]]
+    st       = schema_types[0]
+    is_wide  = schema_col_counts.get(st, 0) > 50
+    profile_pdf, values_pdf, csv_pdf, total_rows = analyse_schema(
+        entries, st, is_wide)
+    print("OK rows=" + str(total_rows))
+except Exception as e:
+    traceback.print_exc()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+==============================================================================
 # PENSKE IOT — Schema Analysis  (Zero Spark during analysis)
 # All analysis uses pandas + boto3 only.
 # Spark is used ONLY to write the final Parquet files at the very end.
