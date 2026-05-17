@@ -1,12 +1,6 @@
-UsageError: %%python is a cell magic, but the cell body is empty.
-TypeError: Invalid argument, not a string or column: 100.0 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
-
-
-
-
-
-%%python
-import boto3, pandas as pd, json, io
+# CELL 1 — Write script to /tmp
+script = """
+import boto3, pandas as pd, json
 from collections import defaultdict
 
 SOURCE_BUCKET = "pske-stg-maintenance"
@@ -17,31 +11,25 @@ OUTPUT_PREFIX = "csv-output/"
 s3c = boto3.client("s3")
 s3r = boto3.resource("s3")
 
-# Find all JSON files grouped by schema type
 json_by_schema = defaultdict(list)
 paginator = s3c.get_paginator("list_objects_v2")
 for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
     for obj in page.get("Contents", []):
-        key  = obj["Key"]
-        size = obj["Size"]
-        if not key.lower().endswith(".json") or size == 0:
+        key = obj["Key"]
+        if not key.lower().endswith(".json") or obj["Size"] == 0:
             continue
-        relative = key[len(SOURCE_PREFIX):]
-        schema   = relative.split("/")[0]
-        json_by_schema[schema].append({"key": key, "size": size})
+        schema = key[len(SOURCE_PREFIX):].split("/")[0]
+        json_by_schema[schema].append({"key": key, "size": obj["Size"]})
 
 schema_list = sorted(json_by_schema.keys())
-print("Schemas found: " + str(schema_list))
+print("Schemas: " + str(schema_list))
 
-# Process each schema
 for schema in schema_list:
-    files    = json_by_schema[schema]
     all_rows = []
-
-    for f in files:
+    for f in json_by_schema[schema]:
         try:
-            body      = s3r.Object(SOURCE_BUCKET, f["key"]).get()["Body"].read()
-            for line in body.decode("utf-8").strip().split("\n"):
+            body = s3r.Object(SOURCE_BUCKET, f["key"]).get()["Body"].read()
+            for line in body.decode("utf-8").strip().split("\\n"):
                 line = line.strip()
                 if line:
                     try:
@@ -50,55 +38,81 @@ for schema in schema_list:
                         pass
             del body
         except Exception as e:
-            print("SKIP " + f["key"] + ": " + str(e))
+            print("SKIP " + str(f["key"]) + ": " + str(e))
 
     if not all_rows:
-        print("No data for " + schema)
+        print("No data: " + schema)
         continue
 
     df         = pd.DataFrame(all_rows)
     total_rows = len(df)
-    print(schema + " rows=" + str(total_rows) + " cols=" + str(list(df.columns)))
+    print(schema + " rows=" + str(total_rows) + " cols=" + str(len(df.columns)))
 
-    mapping_rows = []
+    rows = []
     for col in list(df.columns):
-        series     = df[col].astype(str)
-        null_vals  = {"None","nan","NaT","<NA>","null","none",""}
-        null_mask  = series.isin(null_vals)
-        null_count = int(null_mask.sum())
-        non_null   = series[~null_mask]
-        vc         = non_null.value_counts().head(200)
-        denom      = total_rows if total_rows > 0 else 1
-
         dtype_str = str(df[col].dtype)
-        if   "int"      in dtype_str: data_type = "integer"
-        elif "float"    in dtype_str: data_type = "float"
-        elif "bool"     in dtype_str: data_type = "boolean"
-        elif "datetime" in dtype_str: data_type = "timestamp"
-        else:                         data_type = "string"
+        if   "int"      in dtype_str: dt = "integer"
+        elif "float"    in dtype_str: dt = "float"
+        elif "bool"     in dtype_str: dt = "boolean"
+        elif "datetime" in dtype_str: dt = "timestamp"
+        else:                         dt = "string"
 
-        for rank, (val, cnt) in enumerate(zip(list(vc.index), list(vc.values))):
-            mapping_rows.append({
-                "schema_type"   : schema,
-                "column_name"   : col,
-                "data_type"     : data_type,
-                "value"         : str(val),
-                "value_count"   : int(cnt),
-                "value_pct"     : round(int(cnt)/denom*100, 2),
+        s      = df[col].astype(str)
+        nulls  = {"None","nan","NaT","<NA>","null","none",""}
+        nc     = int(s.isin(nulls).sum())
+        nn     = s[~s.isin(nulls)]
+        vc     = nn.value_counts().head(200)
+        denom  = total_rows if total_rows > 0 else 1
+
+        for i in range(len(vc)):
+            rows.append({
+                "schema_type"   : str(schema),
+                "column_name"   : str(col),
+                "data_type"     : str(dt),
+                "value"         : str(vc.index[i]),
+                "value_count"   : int(vc.values[i]),
+                "value_pct"     : round(int(vc.values[i]) / denom * 100, 2),
                 "total_rows"    : int(total_rows),
-                "null_count"    : int(null_count),
+                "null_count"    : int(nc),
                 "distinct_count": int(len(vc)),
             })
 
-    out_df  = pd.DataFrame(mapping_rows)
-    out_df  = out_df.sort_values(["column_name","value_count"], ascending=[True,False])
+    out = pd.DataFrame(rows)
+    out = out.sort_values(["column_name","value_count"], ascending=[True,False])
     csv_key = OUTPUT_PREFIX + schema + "_column_value_mapping.csv"
     s3c.put_object(
-        Bucket=OUTPUT_BUCKET, Key=csv_key,
-        Body=out_df.to_csv(index=False).encode("utf-8"),
-        ContentType="text/csv")
-    print("SAVED -> s3://" + OUTPUT_BUCKET + "/" + csv_key + " rows=" + str(len(out_df)))
-    print(out_df.head(5).to_string(index=False))
-    del df, all_rows, mapping_rows, out_df
+        Bucket      = OUTPUT_BUCKET,
+        Key         = csv_key,
+        Body        = out.to_csv(index=False).encode("utf-8"),
+        ContentType = "text/csv")
+    print("SAVED -> s3://" + OUTPUT_BUCKET + "/" + csv_key)
+    print(out.head(3).to_string(index=False))
+    del df, all_rows, rows, out
 
-print("ALL DONE - check s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
+print("DONE -> s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
+"""
+
+with open("/tmp/run_analysis.py", "w") as f:
+    f.write(script)
+
+print("Script written to /tmp/run_analysis.py")
+
+
+
+
+# CELL 2 — Run it as subprocess (outside PySpark kernel)
+import subprocess
+
+result = subprocess.run(
+    ["python3", "/tmp/run_analysis.py"],
+    capture_output=True,
+    text=True,
+    timeout=3600
+)
+
+print("=== STDOUT ===")
+print(result.stdout)
+print("=== STDERR ===")
+print(result.stderr)
+print("=== RETURN CODE ===")
+print(result.returncode)
