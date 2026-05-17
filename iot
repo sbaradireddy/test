@@ -1,6 +1,32 @@
 
 PySparkTypeError: [NOT_COLUMN_OR_STR] Argument `col` should be a Column or str, got float.
 
+print("\n" + "═"*60)
+print("  DEBUG — Raw schema field names and their Python types")
+print("═"*60)
+
+for st in schema_types:
+    first_uri = by_schema[st][0]["s3_uri"]
+    print(f"\n  {st}  →  {first_uri}")
+    try:
+        df_debug = spark.read.parquet(first_uri)
+        print(f"  {'Field name':<35} {'Python type of name':<20} {'Spark DataType'}")
+        print(f"  {'─'*35} {'─'*20} {'─'*20}")
+        for field in df_debug.schema.fields:
+            name_pytype = type(field.name).__name__   # should always be 'str'
+            flag = "  ⚠️  NOT A STRING" if not isinstance(field.name, str) else ""
+            print(f"  {str(field.name):<35} {name_pytype:<20} {field.dataType}{flag}")
+    except Exception as e:
+        print(f"  ⚠️  Could not read: {e}")
+
+print("\n" + "═"*60)
+print("  Any row marked ⚠️  is a float/int column name causing your error")
+print("═"*60)
+
+
+
+
+
 
 
 # ==============================================================================
