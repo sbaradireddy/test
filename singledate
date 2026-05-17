@@ -1,6 +1,6 @@
 # ==============================================================================
-# AWS GLUE NOTEBOOK — Penske IoT Schema Analysis + QuickSight Tables
-# VERSION: Generator Error Fixed
+# PENSKE IOT — Schema Analysis + QuickSight Tables
+# VERSION: Pandas-first DataFrame creation (no row conversion errors)
 # ==============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11,18 +11,16 @@ from datetime import datetime
 from collections import defaultdict
 
 import boto3
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import pyarrow as pa
 
 from pyspark.context import SparkContext
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField,
-    StringType, IntegerType, LongType,
-    DoubleType, FloatType, BooleanType,
+    StringType, IntegerType, LongType, DoubleType,
 )
-
 from awsglue.context import GlueContext
 from awsglue.job import Job
 
@@ -37,26 +35,27 @@ DATE_FROM     = "20260401"
 DATE_TO       = "20260401"
 OUTPUT_BUCKET = "pske-stg-maintenance"
 OUTPUT_PREFIX = "reporting-output/"
+WIDE_COLS     = 50      # schemas with more cols than this → pandas path
+MAX_VALS      = 200     # max distinct values per column in CSV
+TOP_N         = 50      # top N values in QuickSight table
 
 s3c    = boto3.client("s3")
 s3_res = boto3.resource("s3")
-
 print("✅ CELL 1 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 ── List S3 files
+# CELL 2 ── List files
 # ─────────────────────────────────────────────────────────────────────────────
-paginator     = s3c.get_paginator("list_objects_v2")
 files_on_date = []
+paginator = s3c.get_paginator("list_objects_v2")
 
 for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
     for obj in page.get("Contents", []):
         key = obj["Key"]
         if not key.lower().endswith(".parquet"):
             continue
-        relative = key[len(SOURCE_PREFIX):].strip("/")
-        parts    = relative.split("/")
+        parts = key[len(SOURCE_PREFIX):].strip("/").split("/")
         if len(parts) < 3:
             continue
         date_folder = parts[0]
@@ -64,15 +63,15 @@ for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
             continue
         filename = parts[-1]
         stem     = filename.rsplit(".parquet", 1)[0]
-        match    = re.match(r"^(SchemaType\d+)", stem, re.IGNORECASE)
-        st       = match.group(1) if match else stem
+        m        = re.match(r"^(SchemaType\d+)", stem, re.IGNORECASE)
+        st       = m.group(1) if m else stem
         files_on_date.append({
-            "s3_key"      : key,
-            "s3_uri"      : f"s3://{SOURCE_BUCKET}/{key}",
-            "schema_type" : st,
-            "filename"    : filename,
-            "size_bytes"  : obj["Size"],
-            "date_folder" : date_folder,
+            "s3_key"     : key,
+            "s3_uri"     : f"s3://{SOURCE_BUCKET}/{key}",
+            "schema_type": st,
+            "filename"   : filename,
+            "size_bytes" : obj["Size"],
+            "date_folder": date_folder,
         })
 
 by_schema    = defaultdict(list)
@@ -83,192 +82,159 @@ schema_types = sorted(by_schema.keys())
 print(f"✅ CELL 2 DONE — {len(files_on_date)} files, {len(schema_types)} schemas")
 for st in schema_types:
     kb = sum(f["size_bytes"] for f in by_schema[st]) / 1024
-    print(f"   {st:<24} {len(by_schema[st]):>4} files  {kb:>8.1f} KB")
+    print(f"   {st:<24} files={len(by_schema[st])}  KB={kb:.1f}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 ── Peek schema of first file per schema type
+# CELL 3 ── Peek column counts
 # ─────────────────────────────────────────────────────────────────────────────
 schema_col_counts = {}
-
-print(f"\n{'Schema':<24} {'Rows':>6}  {'Cols':>6}  {'KB':>8}  Status")
-print("─" * 58)
-
+print(f"\n{'Schema':<24}  {'Rows':>5}  {'Cols':>5}  Status")
+print("─" * 50)
 for st in schema_types:
     entry = by_schema[st][0]
     try:
-        obj  = s3_res.Object(SOURCE_BUCKET, entry["s3_key"])
-        buf  = io.BytesIO(obj.get()["Body"].read())
+        buf  = io.BytesIO(
+            s3_res.Object(SOURCE_BUCKET, entry["s3_key"])
+                  .get()["Body"].read()
+        )
         tbl  = pq.read_table(buf)
-        r, c = tbl.num_rows, len(tbl.schema)
-        kb   = entry["size_bytes"] / 1024
-        schema_col_counts[st] = c
+        schema_col_counts[st] = len(tbl.schema)
+        print(f"   {st:<24}  {tbl.num_rows:>5}  "
+              f"{len(tbl.schema):>5}  ✅")
         del tbl, buf
-        print(f"   {st:<24} {r:>6}  {c:>6}  {kb:>7.1f}  ✅")
     except Exception as e:
         schema_col_counts[st] = 0
-        print(f"   {st:<24} {'ERR':>6}  {'ERR':>6}  {'ERR':>8}  ❌ {e}")
+        print(f"   {st:<24}  {'?':>5}  {'?':>5}  ❌ {e}")
 
-print(f"\n✅ CELL 3 DONE")
-wide_schemas = [st for st, c in schema_col_counts.items() if c > 50]
-print(f"   Wide schemas (>50 cols): {wide_schemas}")
+wide = [s for s, c in schema_col_counts.items() if c > WIDE_COLS]
+print(f"\n✅ CELL 3 DONE — wide schemas: {wide}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 4 ── Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-ARRAY_IDX_RE = re.compile(r"^(.+?)_\d+_(.+)$")
+_ARRAY_RE = re.compile(r"^(.+?)_\d+_(.+)$")
 
-def logical_name(col_name):
-    m = ARRAY_IDX_RE.match(str(col_name))
-    return f"{m.group(1)}_{m.group(2)}" if m else str(col_name)
+def logical_name(col):
+    m = _ARRAY_RE.match(str(col))
+    return f"{m.group(1)}_{m.group(2)}" if m else str(col)
 
-def canonical_type(spark_field_type):
-    t = str(spark_field_type).lower()
+def canonical_type(t):
+    t = str(t).lower()
     t = re.sub(r"type\b", "", t).strip()
     t = re.sub(r"\(.*?\)", "", t).strip()
     return t
+
+def read_s3_parquet_pandas(bucket, key):
+    buf = io.BytesIO(
+        boto3.resource("s3").Object(bucket, key).get()["Body"].read()
+    )
+    df = pq.read_table(buf).to_pandas()
+    del buf
+    return df
 
 print("✅ CELL 4 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 ── Wide schema analyser (pure pandas)
+# CELL 5 ── Wide analyser (pure pandas)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def analyse_wide_pandas(entries, schema_type, max_val=200, top_n=50):
+def analyse_wide(entries, schema_type):
     freq       = defaultdict(lambda: defaultdict(int))
     null_cnt   = defaultdict(int)
     total_rows = 0
 
     for i, entry in enumerate(entries):
         try:
-            obj = s3_res.Object(SOURCE_BUCKET, entry["s3_key"])
-            buf = io.BytesIO(obj.get()["Body"].read())
-            df  = pq.read_table(buf).to_pandas().astype(str)
-            df.replace({"None": pd.NA, "nan": pd.NA, "<NA>": pd.NA},
-                       inplace=True)
-            buf = None
-            n   = len(df)
+            df = read_s3_parquet_pandas(SOURCE_BUCKET, entry["s3_key"])
+            df = df.astype(object).where(df.notna(), other=None)
+            n  = len(df)
             total_rows += n
-            print(f"    [{i+1}/{len(entries)}] {entry['filename']}  "
-                  f"rows={n} cols={len(df.columns)}")
+            print(f"    [{i+1}/{len(entries)}] "
+                  f"{entry['filename']}  rows={n} cols={len(df.columns)}")
 
-            melted  = df.melt(var_name="col_name", value_name="value")
-            melted["logical"] = melted["col_name"].map(logical_name)
-
-            null_mask = melted["value"].isna()
-            for lc, cnt in melted[null_mask].groupby("logical").size().items():
-                null_cnt[lc] += int(cnt)
-
-            non_null = melted[~null_mask]
-            for (lc, val), cnt in non_null.groupby(
-                    ["logical", "value"], sort=False).size().items():
-                freq[lc][str(val)] += int(cnt)
-
-            del df, melted, non_null
+            for col in df.columns:
+                lc = logical_name(col)
+                for val in df[col]:
+                    if val is None or (isinstance(val, float) and np.isnan(val)):
+                        null_cnt[lc] += 1
+                    else:
+                        freq[lc][str(val)] += 1
+            del df
         except Exception as e:
             print(f"    ⚠️  {entry['filename']}: {e}")
 
-    profile_rows = []
-    values_rows  = []
-    csv_rows     = []
+    # Build output as a list of plain Python dicts
+    rows_csv     = []
+    rows_profile = []
+    rows_values  = []
 
     for lc in sorted(freq.keys()):
-        vc          = freq[lc]
-        n_null      = null_cnt.get(lc, 0)
-        sorted_vals = sorted(vc.items(), key=lambda x: -x[1])
-        top_value   = sorted_vals[0][0] if sorted_vals else ""
-        str_keys    = [str(v) for v, _ in sorted_vals]
-        min_val     = min(str_keys) if str_keys else ""
-        max_val_s   = max(str_keys) if str_keys else ""
-        null_pct    = round(n_null / max(total_rows, 1) * 100, 2)
+        vc         = freq[lc]
+        n_null     = int(null_cnt.get(lc, 0))
+        n_distinct = int(len(vc))
+        sorted_vc  = sorted(vc.items(), key=lambda x: -x[1])
+        top_val    = str(sorted_vc[0][0]) if sorted_vc else ""
+        str_keys   = [str(k) for k, _ in sorted_vc]
+        min_v      = str(min(str_keys)) if str_keys else ""
+        max_v      = str(max(str_keys)) if str_keys else ""
+        null_pct   = round(n_null / max(total_rows, 1) * 100, 2)
 
-        profile_rows.append({
-            "schema_type"   : str(schema_type),
-            "column_name"   : str(lc),
-            "original_name" : str(lc),
-            "data_type"     : "string",
-            "total_rows"    : int(total_rows),
-            "null_count"    : int(n_null),
-            "null_pct"      : float(null_pct),
-            "distinct_count": int(len(vc)),
-            "min_value"     : str(min_val),
-            "max_value"     : str(max_val_s),
-            "top_value"     : str(top_value),
-        })
+        rows_profile.append([
+            str(schema_type), str(lc), str(lc), "string",
+            int(total_rows), n_null, float(null_pct),
+            n_distinct, min_v, max_v, top_val,
+        ])
 
-        for rank, (val, cnt) in enumerate(sorted_vals[:max_val], start=1):
-            pct  = round(cnt / max(total_rows, 1) * 100, 2)
-            # ── FIX: build plain dict, NOT a generator / dict comprehension ──
-            csv_row = {
-                "schema_type"   : str(schema_type),
-                "column_name"   : str(lc),
-                "original_name" : str(lc),
-                "data_type"     : "string",
-                "value"         : str(val),
-                "value_count"   : int(cnt),
-                "value_pct"     : float(pct),
-                "total_rows"    : int(total_rows),
-                "null_count"    : int(n_null),
-                "distinct_count": int(len(vc)),
-                "min_value"     : str(min_val),
-                "max_value"     : str(max_val_s),
-            }
-            csv_rows.append(csv_row)
-            if rank <= top_n:
-                val_row = {
-                    "schema_type"  : str(schema_type),
-                    "column_name"  : str(lc),
-                    "original_name": str(lc),
-                    "data_type"    : "string",
-                    "value"        : str(val),
-                    "value_count"  : int(cnt),
-                    "value_pct"    : float(pct),
-                    "value_rank"   : int(rank),
-                    "total_rows"   : int(total_rows),
-                }
-                values_rows.append(val_row)
+        for rank, (val, cnt) in enumerate(sorted_vc[:MAX_VALS], start=1):
+            pct = round(int(cnt) / max(total_rows, 1) * 100, 2)
+            rows_csv.append([
+                str(schema_type), str(lc), str(lc), "string",
+                str(val), int(cnt), float(pct),
+                int(total_rows), n_null, n_distinct, min_v, max_v,
+            ])
+            if rank <= TOP_N:
+                rows_values.append([
+                    str(schema_type), str(lc), str(lc), "string",
+                    str(val), int(cnt), float(pct),
+                    int(rank), int(total_rows),
+                ])
 
-    return profile_rows, values_rows, csv_rows, total_rows
+    return rows_profile, rows_values, rows_csv, int(total_rows)
 
-
-print("✅ CELL 5 DONE — analyse_wide_pandas defined")
+print("✅ CELL 5 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 ── Narrow schema analyser (Spark)
+# CELL 6 ── Narrow analyser (Spark)
 # ─────────────────────────────────────────────────────────────────────────────
+def analyse_narrow(df, schema_type, total_rows):
+    rows_profile = []
+    rows_values  = []
+    rows_csv     = []
 
-def analyse_narrow_spark(df, schema_type, total_rows, max_val=200, top_n=50):
-    data_fields = [
-        (str(f.name), f.dataType)
-        for f in df.schema.fields
-        if not str(f.name).startswith("_")
-    ]
-    profile_rows = []
-    values_rows  = []
-    csv_rows     = []
+    for field in df.schema.fields:
+        col_name = str(field.name)
+        if col_name.startswith("_"):
+            continue
+        col_type = canonical_type(field.dataType)
 
-    for col_name, col_dtype in data_fields:
-        col_type_str = canonical_type(col_dtype)
-        null_count     = 0
+        null_count = 0
         distinct_count = 0
-        min_val        = ""
-        max_val_s      = ""
-        top_values     = []
+        min_v = ""
+        max_v = ""
+        top_vals = []
 
         try:
-            # FIX: pass a plain str to F.col — guaranteed by str(f.name) above
-            col_df = df.select(
-                F.col(col_name).cast("string").alias("value")
-            )
+            # Use df[col_name] instead of F.col() to avoid any type issues
+            col_df = df.select(df[col_name].cast("string").alias("v"))
         except Exception as e:
             print(f"    ⚠️  select failed [{col_name}]: {e}")
             continue
 
         try:
-            null_count = col_df.filter(F.col("value").isNull()).count()
+            null_count = col_df.filter(F.col("v").isNull()).count()
         except Exception:
             pass
         try:
@@ -276,149 +242,115 @@ def analyse_narrow_spark(df, schema_type, total_rows, max_val=200, top_n=50):
         except Exception:
             pass
         try:
-            stats = col_df.dropna().agg(
-                F.min("value").alias("mn"),
-                F.max("value").alias("mx"),
+            st = col_df.dropna().agg(
+                F.min("v").alias("mn"),
+                F.max("v").alias("mx"),
             ).collect()[0]
-            min_val   = str(stats["mn"]) if stats["mn"] else ""
-            max_val_s = str(stats["mx"]) if stats["mx"] else ""
+            min_v = str(st["mn"]) if st["mn"] is not None else ""
+            max_v = str(st["mx"]) if st["mx"] is not None else ""
         except Exception:
             pass
         try:
-            top_values = (
+            top_vals = (
                 col_df.dropna()
-                .groupBy("value")
-                .agg(F.count("*").alias("cnt"))
-                .orderBy(F.col("cnt").desc())
-                .limit(max_val)
+                .groupBy("v").agg(F.count("*").alias("c"))
+                .orderBy(F.col("c").desc())
+                .limit(MAX_VALS)
                 .collect()
             )
         except Exception as e:
-            print(f"    ⚠️  freq failed [{col_name}]: {e}")
+            print(f"    ⚠️  freq [{col_name}]: {e}")
 
-        top_value = str(top_values[0]["value"]) if top_values else ""
-        null_pct  = round(null_count / max(total_rows, 1) * 100, 2)
-        print(f"    ✓ {col_name:<52} "
-              f"null={null_count}  dist={distinct_count}  top='{top_value[:20]}'")
+        top_val  = str(top_vals[0]["v"]) if top_vals else ""
+        null_pct = round(null_count / max(total_rows, 1) * 100, 2)
+        print(f"    ✓ {col_name:<50}  "
+              f"null={null_count} dist={distinct_count} top='{top_val[:20]}'")
 
-        profile_rows.append({
-            "schema_type"   : str(schema_type),
-            "column_name"   : str(col_name),
-            "original_name" : str(col_name),
-            "data_type"     : str(col_type_str),
-            "total_rows"    : int(total_rows),
-            "null_count"    : int(null_count),
-            "null_pct"      : float(null_pct),
-            "distinct_count": int(distinct_count),
-            "min_value"     : str(min_val),
-            "max_value"     : str(max_val_s),
-            "top_value"     : str(top_value),
-        })
+        rows_profile.append([
+            str(schema_type), str(col_name), str(col_name), str(col_type),
+            int(total_rows), int(null_count), float(null_pct),
+            int(distinct_count), str(min_v), str(max_v), str(top_val),
+        ])
 
-        for rank, row in enumerate(top_values[:top_n], start=1):
-            val_str = str(row["value"]) if row["value"] else ""
-            val_cnt = int(row["cnt"])
+        for rank, row in enumerate(top_vals[:TOP_N], start=1):
+            val_str = str(row["v"]) if row["v"] is not None else ""
+            val_cnt = int(row["c"])
             pct     = round(val_cnt / max(total_rows, 1) * 100, 2)
-            # ── FIX: explicit dict, no {**base, ...} spread of generator ─────
-            csv_row = {
-                "schema_type"   : str(schema_type),
-                "column_name"   : str(col_name),
-                "original_name" : str(col_name),
-                "data_type"     : str(col_type_str),
-                "value"         : val_str,
-                "value_count"   : int(val_cnt),
-                "value_pct"     : float(pct),
-                "total_rows"    : int(total_rows),
-                "null_count"    : int(null_count),
-                "distinct_count": int(distinct_count),
-                "min_value"     : str(min_val),
-                "max_value"     : str(max_val_s),
-            }
-            csv_rows.append(csv_row)
-            val_row = {
-                "schema_type"  : str(schema_type),
-                "column_name"  : str(col_name),
-                "original_name": str(col_name),
-                "data_type"    : str(col_type_str),
-                "value"        : val_str,
-                "value_count"  : int(val_cnt),
-                "value_pct"    : float(pct),
-                "value_rank"   : int(rank),
-                "total_rows"   : int(total_rows),
-            }
-            values_rows.append(val_row)
+            rows_csv.append([
+                str(schema_type), str(col_name), str(col_name), str(col_type),
+                val_str, val_cnt, float(pct),
+                int(total_rows), int(null_count),
+                int(distinct_count), str(min_v), str(max_v),
+            ])
+            rows_values.append([
+                str(schema_type), str(col_name), str(col_name), str(col_type),
+                val_str, val_cnt, float(pct), int(rank), int(total_rows),
+            ])
 
-    return profile_rows, values_rows, csv_rows
+    return rows_profile, rows_values, rows_csv
 
-
-print("✅ CELL 6 DONE — analyse_narrow_spark defined")
+print("✅ CELL 6 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 7 ── Main loop
 # ─────────────────────────────────────────────────────────────────────────────
-WIDE_THRESHOLD   = 50
-all_profile_rows = []
-all_values_rows  = []
-all_summary_rows = []
+
+# Column headers for each output type
+CSV_COLS     = ["schema_type","column_name","original_name","data_type",
+                "value","value_count","value_pct","total_rows",
+                "null_count","distinct_count","min_value","max_value"]
+PROFILE_COLS = ["schema_type","column_name","original_name","data_type",
+                "total_rows","null_count","null_pct","distinct_count",
+                "min_value","max_value","top_value"]
+VALUES_COLS  = ["schema_type","column_name","original_name","data_type",
+                "value","value_count","value_pct","value_rank","total_rows"]
+SUMMARY_COLS = ["schema_type","total_columns","total_rows","file_count",
+                "date_count","date_min","date_max","date_list",
+                "analysed_at","is_wide"]
+
+all_profile = []
+all_values  = []
+all_summary = []
 
 for st in schema_types:
     entries  = by_schema[st]
     num_cols = schema_col_counts.get(st, 0)
-    is_wide  = num_cols > WIDE_THRESHOLD
+    is_wide  = num_cols > WIDE_COLS
 
-    print(f"\n{'═'*60}")
-    print(f"  {st}  |  cols={num_cols}  |  "
-          f"{'WIDE→pandas' if is_wide else 'NARROW→Spark'}  |  "
+    print(f"\n{'═'*58}")
+    print(f"  {st} | cols={num_cols} | "
+          f"{'WIDE→pandas' if is_wide else 'NARROW→Spark'} | "
           f"files={len(entries)}")
-    print(f"{'═'*60}")
+    print(f"{'═'*58}")
 
     if is_wide:
-        p, v, c, total_rows = analyse_wide_pandas(entries, st)
+        p_rows, v_rows, c_rows, total_rows = analyse_wide(entries, st)
     else:
         dfs = []
         for entry in entries:
             try:
                 dfs.append(spark.read.parquet(entry["s3_uri"]))
             except Exception as e:
-                print(f"  ⚠️  Skip {entry['filename']}: {e}")
+                print(f"  ⚠️  {entry['filename']}: {e}")
         if not dfs:
-            print(f"  ⚠️  No data — skip")
             continue
         df = dfs[0]
-        for dfi in dfs[1:]:
-            df = df.unionByName(dfi, allowMissingColumns=True)
+        for d in dfs[1:]:
+            df = df.unionByName(d, allowMissingColumns=True)
         total_rows = df.count()
         print(f"  Rows: {total_rows:,}")
-        p, v, c = analyse_narrow_spark(df, st, total_rows)
+        p_rows, v_rows, c_rows = analyse_narrow(df, st, total_rows)
 
-    all_profile_rows.extend(p)
-    all_values_rows.extend(v)
+    all_profile.extend(p_rows)
+    all_values.extend(v_rows)
 
-    # Write CSV immediately — so you get output even if a later schema fails
-    if c:
-        csv_pdf = pd.DataFrame(c)
-        # Force all types explicitly — no implicit conversion
-        str_cols = ["schema_type","column_name","original_name",
-                    "data_type","value","min_value","max_value"]
-        int_cols = ["value_count","total_rows","null_count","distinct_count"]
-        flt_cols = ["value_pct"]
-        for col in str_cols:
-            if col in csv_pdf.columns:
-                csv_pdf[col] = csv_pdf[col].fillna("").astype(str)
-        for col in int_cols:
-            if col in csv_pdf.columns:
-                csv_pdf[col] = pd.to_numeric(
-                    csv_pdf[col], errors="coerce").fillna(0).astype(int)
-        for col in flt_cols:
-            if col in csv_pdf.columns:
-                csv_pdf[col] = pd.to_numeric(
-                    csv_pdf[col], errors="coerce").fillna(0.0).astype(float)
-
+    # Write CSV immediately (safe even if later cells fail)
+    if c_rows:
+        csv_pdf = pd.DataFrame(c_rows, columns=CSV_COLS)
         csv_pdf.sort_values(
-            ["column_name","value_count"], ascending=[True, False],
+            ["column_name","value_count"], ascending=[True,False],
             inplace=True)
-
         csv_key = (f"{OUTPUT_PREFIX}csv_analysis/"
                    f"{st}_column_value_mapping.csv")
         s3c.put_object(
@@ -426,142 +358,112 @@ for st in schema_types:
             Body=csv_pdf.to_csv(index=False).encode("utf-8"),
             ContentType="text/csv",
         )
-        print(f"\n  ✅ CSV saved ({len(csv_pdf)} rows) "
+        print(f"\n  ✅ CSV ({len(csv_pdf)} rows) "
               f"→ s3://{OUTPUT_BUCKET}/{csv_key}")
         print(csv_pdf.head(3).to_string(index=False))
 
-    all_summary_rows.append({
-        "schema_type"  : str(st),
-        "total_columns": int(len(set(r["column_name"] for r in p))),
-        "total_rows"   : int(total_rows),
-        "file_count"   : int(len(entries)),
-        "date_count"   : int(1),
-        "date_min"     : str(DATE_FROM),
-        "date_max"     : str(DATE_TO),
-        "date_list"    : str(DATE_FROM),
-        "analysed_at"  : str(datetime.utcnow().isoformat() + "Z"),
-        "is_wide"      : str(is_wide),
-    })
+    unique_cols = len(set(r[1] for r in p_rows))
+    all_summary.append([
+        str(st), int(unique_cols), int(total_rows),
+        int(len(entries)), 1,
+        str(DATE_FROM), str(DATE_TO), str(DATE_FROM),
+        str(datetime.utcnow().isoformat() + "Z"),
+        str(is_wide),
+    ])
 
-print(f"\n✅ CELL 7 DONE — {len(schema_types)} schemas processed")
+print(f"\n✅ CELL 7 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 8 ── Build Spark DataFrames with explicit schemas
+# CELL 8 ── Build Spark DataFrames via pandas (safest conversion path)
 #
-# FIX: safe_rows() now builds rows as a plain list of plain dicts.
-#      Previous version used a dict-comprehension inside a list-comprehension
-#      which in some Python/PySpark versions produces a generator object
-#      instead of a dict — causing "got generator" TypeError.
+# KEY FIX:
+#   Instead of spark.createDataFrame(list_of_dicts, schema=...) which
+#   requires exact Python type matching and fails with "got generator",
+#   we first build a pandas DataFrame with explicit dtypes, then call
+#   spark.createDataFrame(pandas_df) which handles all type coercion
+#   internally and never raises "got generator".
 # ─────────────────────────────────────────────────────────────────────────────
 
-profile_schema = StructType([
-    StructField("schema_type",    StringType(),  True),
-    StructField("column_name",    StringType(),  True),
-    StructField("original_name",  StringType(),  True),
-    StructField("data_type",      StringType(),  True),
-    StructField("total_rows",     LongType(),    True),
-    StructField("null_count",     LongType(),    True),
-    StructField("null_pct",       DoubleType(),  True),
-    StructField("distinct_count", LongType(),    True),
-    StructField("min_value",      StringType(),  True),
-    StructField("max_value",      StringType(),  True),
-    StructField("top_value",      StringType(),  True),
-])
-values_schema = StructType([
-    StructField("schema_type",   StringType(),  True),
-    StructField("column_name",   StringType(),  True),
-    StructField("original_name", StringType(),  True),
-    StructField("data_type",     StringType(),  True),
-    StructField("value",         StringType(),  True),
-    StructField("value_count",   LongType(),    True),
-    StructField("value_pct",     DoubleType(),  True),
-    StructField("value_rank",    IntegerType(), True),
-    StructField("total_rows",    LongType(),    True),
-])
-summary_schema = StructType([
-    StructField("schema_type",   StringType(),  True),
-    StructField("total_columns", IntegerType(), True),
-    StructField("total_rows",    LongType(),    True),
-    StructField("file_count",    IntegerType(), True),
-    StructField("date_count",    IntegerType(), True),
-    StructField("date_min",      StringType(),  True),
-    StructField("date_max",      StringType(),  True),
-    StructField("date_list",     StringType(),  True),
-    StructField("analysed_at",   StringType(),  True),
-    StructField("is_wide",       StringType(),  True),
-])
-
-
-def safe_rows(rows, schema):
+def rows_to_spark(rows, col_names, dtypes_map):
     """
-    FIX: Convert each row dict to a NEW plain dict matching the schema exactly.
-    Uses an explicit for-loop — NOT a dict-comprehension inside a
-    list-comprehension, which can produce a generator object in some
-    PySpark versions and cause 'got generator' TypeError.
+    rows      : list of lists (one list per row)
+    col_names : list of column name strings
+    dtypes_map: dict of col_name → pandas dtype string
+                e.g. {"total_rows": "int64", "null_pct": "float64"}
+
+    Builds a pandas DataFrame with explicit dtypes,
+    then converts to Spark — bypasses all row-dict conversion issues.
     """
-    COERCE = {
-        "StringType()" : lambda v: str(v)   if v is not None else None,
-        "LongType()"   : lambda v: int(v)   if v is not None else None,
-        "IntegerType()": lambda v: int(v)   if v is not None else None,
-        "DoubleType()" : lambda v: float(v) if v is not None else None,
-        "FloatType()"  : lambda v: float(v) if v is not None else None,
-        "BooleanType()": lambda v: bool(v)  if v is not None else None,
-    }
-    result = []                              # plain list
-    for row in rows:
-        new_row = {}                         # plain dict — NOT a generator
-        for field in schema.fields:
-            raw    = row.get(field.name)     # get raw value
-            coerce = COERCE.get(str(field.dataType), lambda v: v)
-            new_row[field.name] = coerce(raw)   # explicit key = value
-        result.append(new_row)               # append plain dict
-    return result                            # return plain list
+    if not rows:
+        # Return empty pandas DF with correct columns
+        pdf = pd.DataFrame(columns=col_names)
+    else:
+        pdf = pd.DataFrame(rows, columns=col_names)
+
+    # Apply explicit dtypes
+    for col, dtype in dtypes_map.items():
+        if col in pdf.columns:
+            try:
+                if dtype == "str":
+                    pdf[col] = pdf[col].fillna("").astype(str)
+                elif dtype == "int64":
+                    pdf[col] = pd.to_numeric(
+                        pdf[col], errors="coerce").fillna(0).astype("int64")
+                elif dtype == "float64":
+                    pdf[col] = pd.to_numeric(
+                        pdf[col], errors="coerce").fillna(0.0).astype("float64")
+            except Exception as e:
+                print(f"  ⚠️  dtype coerce [{col}→{dtype}]: {e}")
+
+    return spark.createDataFrame(pdf)
 
 
-# Build DataFrames
-profile_df = spark.createDataFrame(
-    safe_rows(all_profile_rows, profile_schema),
-    schema=profile_schema
-)
-values_df = spark.createDataFrame(
-    safe_rows(all_values_rows, values_schema),
-    schema=values_schema
-)
-summary_df = spark.createDataFrame(
-    safe_rows(all_summary_rows, summary_schema),
-    schema=summary_schema
-)
+PROFILE_DTYPES = {
+    "schema_type":"str","column_name":"str","original_name":"str",
+    "data_type":"str","total_rows":"int64","null_count":"int64",
+    "null_pct":"float64","distinct_count":"int64",
+    "min_value":"str","max_value":"str","top_value":"str",
+}
+VALUES_DTYPES = {
+    "schema_type":"str","column_name":"str","original_name":"str",
+    "data_type":"str","value":"str","value_count":"int64",
+    "value_pct":"float64","value_rank":"int64","total_rows":"int64",
+}
+SUMMARY_DTYPES = {
+    "schema_type":"str","total_columns":"int64","total_rows":"int64",
+    "file_count":"int64","date_count":"int64",
+    "date_min":"str","date_max":"str","date_list":"str",
+    "analysed_at":"str","is_wide":"str",
+}
 
-print("✅ CELL 8 DONE — DataFrames created")
+profile_df = rows_to_spark(all_profile, PROFILE_COLS, PROFILE_DTYPES)
+values_df  = rows_to_spark(all_values,  VALUES_COLS,  VALUES_DTYPES)
+summary_df = rows_to_spark(all_summary, SUMMARY_COLS, SUMMARY_DTYPES)
+
+print("✅ CELL 8 DONE — Spark DataFrames created via pandas")
 print(f"   profile_df : {profile_df.count():,} rows")
 print(f"   values_df  : {values_df.count():,} rows")
 print(f"   summary_df : {summary_df.count():,} rows")
 
 print("\n📋 Summary:")
 summary_df.show(truncate=False)
-print("\n📋 Profile sample:")
+print("\n📋 Profile (sample):")
 profile_df.show(10, truncate=False)
 
 # Write Parquet
 base = f"s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}quicksight_tables"
-(profile_df
- .repartition(1, "schema_type")
- .write.partitionBy("schema_type")
- .mode("overwrite")
+(profile_df.repartition(1, "schema_type")
+ .write.partitionBy("schema_type").mode("overwrite")
  .parquet(f"{base}/schema_column_profile/"))
 print("✅ schema_column_profile written")
 
-(values_df
- .repartition(1, "schema_type")
- .write.partitionBy("schema_type")
- .mode("overwrite")
+(values_df.repartition(1, "schema_type")
+ .write.partitionBy("schema_type").mode("overwrite")
  .parquet(f"{base}/schema_column_values/"))
 print("✅ schema_column_values written")
 
-(summary_df
- .coalesce(1)
- .write.mode("overwrite")
+(summary_df.coalesce(1).write.mode("overwrite")
  .parquet(f"{base}/schema_summary/"))
 print("✅ schema_summary written")
 
@@ -581,56 +483,43 @@ except glue_client.exceptions.AlreadyExistsException:
     print(f"ℹ️  DB exists : {glue_db}")
 
 
-def register_table(name, path, schema, pk=None):
-    TYPE_MAP = {
-        "StringType()" : "string",
-        "LongType()"   : "bigint",
-        "IntegerType()": "int",
-        "DoubleType()"  : "double",
-        "FloatType()"  : "float",
-        "BooleanType()": "boolean",
-    }
-    # FIX: build cols as a plain list — NOT a generator expression
+def register_table(name, path, col_names, dtypes_map, pk=None):
+    TYPE_MAP = {"str":"string","int64":"bigint","float64":"double"}
     cols = []
-    for f in schema.fields:
-        if f.name == pk:
+    for c in col_names:
+        if c == pk:
             continue
-        cols.append({
-            "Name": str(f.name),
-            "Type": TYPE_MAP.get(str(f.dataType), "string"),
-        })
+        glue_type = TYPE_MAP.get(dtypes_map.get(c, "str"), "string")
+        cols.append({"Name": c, "Type": glue_type})
 
-    part_keys = []
-    if pk:
-        part_keys.append({"Name": str(pk), "Type": "string"})
+    part_keys = [{"Name": pk, "Type": "string"}] if pk else []
 
-    tbl_input = {
-        "Name": str(name),
+    tbl = {
+        "Name": name,
         "StorageDescriptor": {
-            "Columns"      : cols,
-            "Location"     : str(path),
-            "InputFormat"  : ("org.apache.hadoop.hive.ql.io"
-                              ".parquet.MapredParquetInputFormat"),
-            "OutputFormat" : ("org.apache.hadoop.hive.ql.io"
-                              ".parquet.MapredParquetOutputFormat"),
-            "SerdeInfo"    : {
+            "Columns": cols, "Location": path,
+            "InputFormat": ("org.apache.hadoop.hive.ql.io"
+                            ".parquet.MapredParquetInputFormat"),
+            "OutputFormat": ("org.apache.hadoop.hive.ql.io"
+                             ".parquet.MapredParquetOutputFormat"),
+            "SerdeInfo": {
                 "SerializationLibrary": (
                     "org.apache.hadoop.hive.ql.io"
                     ".parquet.serde.ParquetHiveSerDe"),
                 "Parameters": {"serialization.format": "1"},
             },
-            "Compressed"            : False,
+            "Compressed": False,
             "StoredAsSubDirectories": True,
         },
         "PartitionKeys": part_keys,
-        "TableType"    : "EXTERNAL_TABLE",
-        "Parameters"   : {"classification": "parquet", "EXTERNAL": "TRUE"},
+        "TableType": "EXTERNAL_TABLE",
+        "Parameters": {"classification": "parquet", "EXTERNAL": "TRUE"},
     }
     try:
-        glue_client.create_table(DatabaseName=glue_db, TableInput=tbl_input)
+        glue_client.create_table(DatabaseName=glue_db, TableInput=tbl)
         print(f"  ✅ Created  {glue_db}.{name}")
     except glue_client.exceptions.AlreadyExistsException:
-        glue_client.update_table(DatabaseName=glue_db, TableInput=tbl_input)
+        glue_client.update_table(DatabaseName=glue_db, TableInput=tbl)
         print(f"  ✅ Updated  {glue_db}.{name}")
     try:
         boto3.client("athena").start_query_execution(
@@ -644,24 +533,19 @@ def register_table(name, path, schema, pk=None):
         print(f"     Partition repair skipped: {e}")
 
 
-register_table(
-    "schema_column_profile",
-    f"{base}/schema_column_profile/",
-    profile_schema, "schema_type")
-register_table(
-    "schema_column_values",
-    f"{base}/schema_column_values/",
-    values_schema, "schema_type")
-register_table(
-    "schema_summary",
-    f"{base}/schema_summary/",
-    summary_schema)
+register_table("schema_column_profile",
+               f"{base}/schema_column_profile/",
+               PROFILE_COLS, PROFILE_DTYPES, pk="schema_type")
+register_table("schema_column_values",
+               f"{base}/schema_column_values/",
+               VALUES_COLS, VALUES_DTYPES, pk="schema_type")
+register_table("schema_summary",
+               f"{base}/schema_summary/",
+               SUMMARY_COLS, SUMMARY_DTYPES)
 
 job.commit()
-
 print("\n✅ CELL 9 DONE — job committed")
-print(f"\nOutputs:")
-print(f"  CSV per schema → s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}csv_analysis/")
-print(f"  Parquet tables → s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}quicksight_tables/")
-print(f"  Glue database  → {glue_db}")
-print(f"    schema_summary | schema_column_profile | schema_column_values")
+print(f"\n  CSV     → s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}csv_analysis/")
+print(f"  Parquet → s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}quicksight_tables/")
+print(f"  Glue    → {glue_db}")
+print(f"    tables: schema_summary | schema_column_profile | schema_column_values")
