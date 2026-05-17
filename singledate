@@ -12,7 +12,9 @@ except Exception as e:
 
 
 
-
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+NameError: name 'schema_col_counts' is not defined
 
 
 
