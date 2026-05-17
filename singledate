@@ -1,58 +1,31 @@
-#
-import traceback
-try:
-    entries  = by_schema[schema_types[0]]
-    st       = schema_types[0]
-    is_wide  = schema_col_counts.get(st, 0) > 50
-    profile_pdf, values_pdf, csv_pdf, total_rows = analyse_schema(
-        entries, st, is_wide)
-    print("OK rows=" + str(total_rows))
-except Exception as e:
-    traceback.print_exc()
+"""
+PENSKE IOT — Schema Analysis
+Run as: AWS Glue Python Shell Job (NOT a PySpark notebook)
+Python version: 3.9
+Required libraries: pandas, pyarrow, boto3 (all pre-installed in Glue Python Shell)
 
+Steps to create this job in AWS Glue:
+1. Go to AWS Glue > Jobs > Create Job
+2. Choose "Python Shell script editor"
+3. Paste this entire script
+4. Set job parameters if needed
+5. Run
+"""
 
-
-Traceback (most recent call last):
-  File "<stdin>", line 5, in <module>
-NameError: name 'schema_col_counts' is not defined
-
-
-
-
-
-
-
-
-
-
-==============================================================================
-# PENSKE IOT — Schema Analysis  (Zero Spark during analysis)
-# All analysis uses pandas + boto3 only.
-# Spark is used ONLY to write the final Parquet files at the very end.
-# ==============================================================================
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 — Spark init (needed only for final Parquet write)
-# ─────────────────────────────────────────────────────────────────────────────
 import io
 import re
+import sys
 import boto3
-import numpy as np
+import numpy
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime
 from collections import defaultdict
 
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-
-sc          = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark       = glueContext.spark_session
-job         = Job(glueContext)
-
+# ==============================================================================
+# CONFIG
+# ==============================================================================
 SOURCE_BUCKET = "pske-stg-maintenance"
 SOURCE_PREFIX = "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.campaigns.events/"
 DATE_FROM     = "20260401"
@@ -63,333 +36,282 @@ WIDE_COLS     = 50
 MAX_VALS      = 200
 TOP_N         = 50
 
-s3c = boto3.client("s3")
-print("CELL 1 DONE")
+s3_client   = boto3.client("s3")
+s3_resource = boto3.resource("s3")
+
+print("CONFIG OK")
+print("source=" + SOURCE_BUCKET + "/" + SOURCE_PREFIX)
+print("output=" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 — List files
-# ─────────────────────────────────────────────────────────────────────────────
-import io, re, boto3
-from collections import defaultdict
+# ==============================================================================
+# STEP 1 — List files
+# ==============================================================================
+def list_files():
+    files = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.lower().endswith(".parquet"):
+                continue
+            parts = key[len(SOURCE_PREFIX):].strip("/").split("/")
+            if len(parts) < 3:
+                continue
+            date_folder = parts[0]
+            if date_folder < DATE_FROM or date_folder > DATE_TO:
+                continue
+            filename    = parts[-1]
+            stem        = filename.rsplit(".parquet", 1)[0]
+            m           = re.match(r"^(SchemaType\d+)", stem, re.IGNORECASE)
+            schema_type = m.group(1) if m else stem
+            files.append({
+                "s3_key"     : key,
+                "schema_type": schema_type,
+                "filename"   : filename,
+                "size_bytes" : int(obj["Size"]),
+            })
+    return files
 
-files_on_date = []
-for page in boto3.client("s3").get_paginator("list_objects_v2").paginate(
-        Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
-    for obj in page.get("Contents", []):
-        key = obj["Key"]
-        if not key.lower().endswith(".parquet"):
-            continue
-        parts = key[len(SOURCE_PREFIX):].strip("/").split("/")
-        if len(parts) < 3:
-            continue
-        date_folder = parts[0]
-        if date_folder < DATE_FROM or date_folder > DATE_TO:
-            continue
-        filename    = parts[-1]
-        stem        = filename.rsplit(".parquet", 1)[0]
-        m           = re.match(r"^(SchemaType\d+)", stem, re.IGNORECASE)
-        schema_type = m.group(1) if m else stem
-        e = dict()
-        e["s3_key"]      = key
-        e["schema_type"] = schema_type
-        e["filename"]    = filename
-        e["size_bytes"]  = int(obj["Size"])
-        files_on_date.append(e)
 
-by_schema    = defaultdict(list)
-for f in files_on_date:
+all_files = list_files()
+by_schema = defaultdict(list)
+for f in all_files:
     by_schema[f["schema_type"]].append(f)
 schema_types = sorted(by_schema.keys())
 
-print("CELL 2 DONE  files=" + str(len(files_on_date))
-      + "  schemas=" + str(len(schema_types)))
+print("FILES=" + str(len(all_files)) + "  SCHEMAS=" + str(len(schema_types)))
 for st in schema_types:
-    kb = 0
+    total_kb = 0
     for f in by_schema[st]:
-        kb = kb + f["size_bytes"]
-    kb = kb / 1024
-    print("  " + st + "  files=" + str(len(by_schema[st]))
-          + "  kb=" + str(round(kb, 1)))
+        total_kb += f["size_bytes"]
+    print("  " + st + " files=" + str(len(by_schema[st]))
+          + " kb=" + str(round(total_kb / 1024, 1)))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — Peek column counts
-# ─────────────────────────────────────────────────────────────────────────────
-import io, boto3
-import pyarrow.parquet as pq
+# ==============================================================================
+# STEP 2 — Peek column counts
+# ==============================================================================
+def get_col_count(bucket, key):
+    body = s3_resource.Object(bucket, key).get()["Body"].read()
+    buf  = io.BytesIO(body)
+    tbl  = pq.read_table(buf)
+    n    = len(tbl.schema)
+    del tbl, buf, body
+    return n
 
-schema_col_counts = dict()
+
+schema_col_counts = {}
 for st in schema_types:
     entry = by_schema[st][0]
     try:
-        body  = boto3.resource("s3").Object(
-            SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
-        buf   = io.BytesIO(body)
-        tbl   = pq.read_table(buf)
-        ncols = int(len(tbl.schema))
-        nrows = int(tbl.num_rows)
-        schema_col_counts[st] = ncols
-        del tbl, buf, body
-        print(st + "  rows=" + str(nrows) + "  cols=" + str(ncols))
+        n = get_col_count(SOURCE_BUCKET, entry["s3_key"])
+        schema_col_counts[st] = n
+        print(st + " cols=" + str(n))
     except Exception as e:
         schema_col_counts[st] = 0
-        print(st + "  ERROR=" + str(e))
-
-wide_list = []
-for st in schema_types:
-    if schema_col_counts[st] > WIDE_COLS:
-        wide_list.append(st)
-print("CELL 3 DONE  wide=" + str(wide_list))
+        print(st + " ERROR=" + str(e))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 4 — Helpers (pure Python, no Spark)
-# ─────────────────────────────────────────────────────────────────────────────
-import io, re, boto3
-import pyarrow.parquet as pq
-
-_ARR = re.compile(r"^(.+?)_\d+_(.+)$")
+# ==============================================================================
+# STEP 3 — Helpers
+# ==============================================================================
+_ARR_RE = re.compile(r"^(.+?)_\d+_(.+)$")
 
 def logical_name(col):
     col = str(col)
-    m   = _ARR.match(col)
+    m   = _ARR_RE.match(col)
     if m:
         return m.group(1) + "_" + m.group(2)
     return col
 
-def read_parquet_as_pandas(bucket, key):
-    import io as _io
-    import boto3 as _b3
-    import pyarrow.parquet as _pq
-    body = _b3.resource("s3").Object(bucket, key).get()["Body"].read()
-    buf  = _io.BytesIO(body)
-    df   = _pq.read_table(buf).to_pandas()
-    del buf, body
-    return df
-
-def safe_str(v):
-    """Convert any value to plain Python str."""
+def to_str(v):
     if v is None:
         return ""
     s = str(v)
-    if s in ("None", "nan", "NaN", "NaT", "<NA>", "null"):
+    if s in ("None", "nan", "NaN", "NaT", "<NA>", "null", "none"):
         return ""
     return s
 
-def safe_int(v):
-    """Convert any value to plain Python int."""
+def to_int(v):
     try:
         return int(v)
     except Exception:
         return 0
 
-def safe_float(v):
-    """Convert any value to plain Python float."""
+def to_float(v):
     try:
-        return float(v)
+        f = float(v)
+        if numpy.isnan(f) or numpy.isinf(f):
+            return 0.0
+        return f
     except Exception:
         return 0.0
 
-print("CELL 4 DONE")
+def read_parquet(bucket, key):
+    body = s3_resource.Object(bucket, key).get()["Body"].read()
+    buf  = io.BytesIO(body)
+    df   = pq.read_table(buf).to_pandas()
+    del buf, body
+    return df
+
+NULL_VALS = {"None", "nan", "NaN", "NaT", "<NA>", "null", "none", ""}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 — Analyse one schema type (pure pandas, NO Spark at all)
-# Returns three pandas DataFrames: profile_pdf, values_pdf, csv_pdf
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
+# STEP 4 — Analyse one schema type
+# ==============================================================================
+def analyse_schema(schema_type, entries, is_wide):
 
-def analyse_schema(entries, schema_type, is_wide):
-    import io as _io
-    import boto3 as _b3
-    import numpy as _np
-    import pandas as _pd
-    import pyarrow.parquet as _pq
-    from collections import defaultdict as _dd
-
-    # ── Step 1: read all files into one combined pandas DataFrame ─────────────
+    # Read all files
     frames = []
     for i in range(len(entries)):
         entry = entries[i]
         try:
-            body = _b3.resource("s3").Object(
-                SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
-            buf  = _io.BytesIO(body)
-            df   = _pq.read_table(buf).to_pandas()
-            del buf, body
+            df = read_parquet(SOURCE_BUCKET, entry["s3_key"])
             print("  [" + str(i+1) + "/" + str(len(entries)) + "] "
                   + entry["filename"]
-                  + "  rows=" + str(len(df))
-                  + "  cols=" + str(len(df.columns)))
+                  + " rows=" + str(len(df))
+                  + " cols=" + str(len(df.columns)))
             frames.append(df)
         except Exception as e:
             print("  SKIP " + entry["filename"] + ": " + str(e))
 
-    if len(frames) == 0:
-        empty_p = _pd.DataFrame(columns=[
-            "schema_type","column_name","original_name","data_type",
-            "total_rows","null_count","null_pct","distinct_count",
-            "min_value","max_value","top_value"])
-        empty_v = _pd.DataFrame(columns=[
-            "schema_type","column_name","original_name","data_type",
-            "value","value_count","value_pct","value_rank","total_rows"])
-        empty_c = _pd.DataFrame(columns=[
-            "schema_type","column_name","original_name","data_type",
-            "value","value_count","value_pct","total_rows",
-            "null_count","distinct_count","min_value","max_value"])
-        return empty_p, empty_v, empty_c, 0
+    if not frames:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
 
-    combined   = _pd.concat(frames, ignore_index=True, sort=False)
-    total_rows = int(len(combined))
+    combined   = pd.concat(frames, ignore_index=True, sort=False)
+    total_rows = len(combined)
     del frames
-    print("  Combined: rows=" + str(total_rows)
-          + "  cols=" + str(len(combined.columns)))
+    print("  combined rows=" + str(total_rows)
+          + " cols=" + str(len(combined.columns)))
 
-    # ── Step 2: build column list ─────────────────────────────────────────────
+    # Build logical column mapping
     raw_cols = list(combined.columns)
-    if is_wide:
-        # Map to logical names (strip array index)
-        col_map = dict()
-        for c in raw_cols:
-            lc = logical_name(c)
-            if lc not in col_map:
-                col_map[lc] = []
-            col_map[lc].append(c)
-        work_cols = sorted(col_map.keys())
-    else:
-        col_map   = dict()
-        for c in raw_cols:
-            col_map[str(c)] = [str(c)]
-        work_cols = [str(c) for c in raw_cols]
+    col_map  = {}
+    for c in raw_cols:
+        lc = logical_name(c) if is_wide else str(c)
+        if lc not in col_map:
+            col_map[lc] = []
+        col_map[lc].append(str(c))
 
-    # ── Step 3: per logical column, compute stats ─────────────────────────────
+    # Sort logical column names using plain Python list sort
+    work_cols = list(col_map.keys())
+    work_cols.sort()
+
     profile_rows = []
     values_rows  = []
     csv_rows     = []
 
-    null_replace = ["None", "nan", "NaN", "NaT", "<NA>", "null", ""]
+    denom = total_rows if total_rows > 0 else 1
 
     for lc in work_cols:
-        # Merge all physical columns for this logical name into one series
-        phys_cols  = col_map[lc]
+        phys_cols = col_map[lc]
+
+        # Build series for this logical column
         parts_list = []
         for pc in phys_cols:
             s = combined[pc].astype(str)
             parts_list.append(s)
 
         if len(parts_list) == 1:
-            series = parts_list[0]
+            series = parts_list[0].copy()
         else:
-            series = _pd.concat(parts_list, ignore_index=True)
+            series = pd.concat(parts_list, ignore_index=True)
 
-        # Replace null-like strings
-        for ns in null_replace:
-            series = series.replace(ns, _pd.NA)
+        # Replace null-like strings with actual NaN
+        series = series.where(~series.isin(NULL_VALS), other=pd.NA)
 
-        # Stats — all pure Python, no Spark
-        null_count     = safe_int(series.isna().sum())
+        null_count     = to_int(series.isna().sum())
         non_null       = series.dropna()
-        distinct_count = safe_int(non_null.nunique())
+        distinct_count = to_int(non_null.nunique())
 
-        # min / max using sorted list (avoids PySpark min/max shadow)
+        # min/max: convert to list and use index access after sort
+        # (avoids any framework shadowing of min/max/sorted)
+        min_v = ""
+        max_v = ""
         if len(non_null) > 0:
-            non_null_list   = list(non_null)
-            non_null_sorted = sorted(non_null_list)
-            min_v = safe_str(non_null_sorted[0])
-            max_v = safe_str(non_null_sorted[-1])
-        else:
-            min_v = ""
-            max_v = ""
+            vals_list = list(non_null)
+            vals_list.sort()          # in-place list sort — not shadowed
+            min_v = to_str(vals_list[0])
+            max_v = to_str(vals_list[-1])
 
         # value counts
-        vc = non_null.value_counts()
-        if len(vc) > MAX_VALS:
-            vc = vc.head(MAX_VALS)
-
-        top_val  = safe_str(vc.index[0]) if len(vc) > 0 else ""
-        denom    = total_rows if total_rows > 0 else 1
-        null_pct = round(safe_float(null_count) / denom * 100, 2)
+        vc       = non_null.value_counts()
+        vc_head  = vc.head(MAX_VALS)
+        vc_idx   = list(vc_head.index)
+        vc_vals  = list(vc_head.values)
+        top_val  = to_str(vc_idx[0]) if vc_idx else ""
+        null_pct = round(to_float(null_count) / denom * 100, 2)
 
         print("  col=" + lc
-              + "  null=" + str(null_count)
-              + "  dist=" + str(distinct_count)
-              + "  top=" + top_val[:20])
+              + " null=" + str(null_count)
+              + " dist=" + str(distinct_count)
+              + " top=" + top_val[:20])
 
-        # Profile row — all values are plain Python types
-        p_row = dict()
-        p_row["schema_type"]    = safe_str(schema_type)
-        p_row["column_name"]    = safe_str(lc)
-        p_row["original_name"]  = safe_str(lc)
-        p_row["data_type"]      = "string"
-        p_row["total_rows"]     = safe_int(total_rows)
-        p_row["null_count"]     = safe_int(null_count)
-        p_row["null_pct"]       = safe_float(null_pct)
-        p_row["distinct_count"] = safe_int(distinct_count)
-        p_row["min_value"]      = safe_str(min_v)
-        p_row["max_value"]      = safe_str(max_v)
-        p_row["top_value"]      = safe_str(top_val)
-        profile_rows.append(p_row)
+        # Build profile row as a plain dict with explicit Python types
+        profile_rows.append({
+            "schema_type"   : to_str(schema_type),
+            "column_name"   : to_str(lc),
+            "original_name" : to_str(lc),
+            "data_type"     : "string",
+            "total_rows"    : to_int(total_rows),
+            "null_count"    : to_int(null_count),
+            "null_pct"      : to_float(null_pct),
+            "distinct_count": to_int(distinct_count),
+            "min_value"     : to_str(min_v),
+            "max_value"     : to_str(max_v),
+            "top_value"     : to_str(top_val),
+        })
 
-        vc_index  = list(vc.index)
-        vc_values = list(vc.values)
-        limit     = len(vc_index)
+        # Build value rows
+        for rank in range(len(vc_idx)):
+            val_str = to_str(vc_idx[rank])
+            cnt     = to_int(vc_vals[rank])
+            pct     = round(to_float(cnt) / denom * 100, 2)
 
-        for rank in range(limit):
-            val_str = safe_str(vc_index[rank])
-            cnt_int = safe_int(vc_values[rank])
-            pct     = round(safe_float(cnt_int) / denom * 100, 2)
-
-            c_row = dict()
-            c_row["schema_type"]    = safe_str(schema_type)
-            c_row["column_name"]    = safe_str(lc)
-            c_row["original_name"]  = safe_str(lc)
-            c_row["data_type"]      = "string"
-            c_row["value"]          = val_str
-            c_row["value_count"]    = cnt_int
-            c_row["value_pct"]      = safe_float(pct)
-            c_row["total_rows"]     = safe_int(total_rows)
-            c_row["null_count"]     = safe_int(null_count)
-            c_row["distinct_count"] = safe_int(distinct_count)
-            c_row["min_value"]      = safe_str(min_v)
-            c_row["max_value"]      = safe_str(max_v)
-            csv_rows.append(c_row)
+            csv_rows.append({
+                "schema_type"   : to_str(schema_type),
+                "column_name"   : to_str(lc),
+                "original_name" : to_str(lc),
+                "data_type"     : "string",
+                "value"         : val_str,
+                "value_count"   : to_int(cnt),
+                "value_pct"     : to_float(pct),
+                "total_rows"    : to_int(total_rows),
+                "null_count"    : to_int(null_count),
+                "distinct_count": to_int(distinct_count),
+                "min_value"     : to_str(min_v),
+                "max_value"     : to_str(max_v),
+            })
 
             if rank < TOP_N:
-                v_row = dict()
-                v_row["schema_type"]   = safe_str(schema_type)
-                v_row["column_name"]   = safe_str(lc)
-                v_row["original_name"] = safe_str(lc)
-                v_row["data_type"]     = "string"
-                v_row["value"]         = val_str
-                v_row["value_count"]   = cnt_int
-                v_row["value_pct"]     = safe_float(pct)
-                v_row["value_rank"]    = safe_int(rank + 1)
-                v_row["total_rows"]    = safe_int(total_rows)
-                values_rows.append(v_row)
+                values_rows.append({
+                    "schema_type"  : to_str(schema_type),
+                    "column_name"  : to_str(lc),
+                    "original_name": to_str(lc),
+                    "data_type"    : "string",
+                    "value"        : val_str,
+                    "value_count"  : to_int(cnt),
+                    "value_pct"    : to_float(pct),
+                    "value_rank"   : to_int(rank + 1),
+                    "total_rows"   : to_int(total_rows),
+                })
 
     del combined
 
-    profile_pdf = _pd.DataFrame(profile_rows)
-    values_pdf  = _pd.DataFrame(values_rows)
-    csv_pdf     = _pd.DataFrame(csv_rows)
-
-    return profile_pdf, values_pdf, csv_pdf, total_rows
-
-print("CELL 5 DONE")
+    return (pd.DataFrame(profile_rows),
+            pd.DataFrame(values_rows),
+            pd.DataFrame(csv_rows),
+            total_rows)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 — Main loop: analyse each schema, save CSV immediately
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-import pandas as pd
-from datetime import datetime
-
-all_profile_pdfs = []
-all_values_pdfs  = []
+# ==============================================================================
+# STEP 5 — Main loop
+# ==============================================================================
+all_profile_dfs = []
+all_values_dfs  = []
 all_summary_rows = []
-
-s3c_main = boto3.client("s3")
 
 for st in schema_types:
     entries  = by_schema[st]
@@ -397,296 +319,224 @@ for st in schema_types:
     is_wide  = num_cols > WIDE_COLS
 
     print("\n" + "="*55)
-    print("schema=" + st
-          + "  cols=" + str(num_cols)
-          + "  wide=" + str(is_wide)
-          + "  files=" + str(len(entries)))
+    print("SCHEMA=" + st
+          + " cols=" + str(num_cols)
+          + " wide=" + str(is_wide)
+          + " files=" + str(len(entries)))
     print("="*55)
 
-    profile_pdf, values_pdf, csv_pdf, total_rows = analyse_schema(
-        entries, st, is_wide)
+    p_df, v_df, c_df, total_rows = analyse_schema(st, entries, is_wide)
 
-    if len(profile_pdf) > 0:
-        all_profile_pdfs.append(profile_pdf)
-    if len(values_pdf) > 0:
-        all_values_pdfs.append(values_pdf)
+    if len(p_df) > 0:
+        all_profile_dfs.append(p_df)
+    if len(v_df) > 0:
+        all_values_dfs.append(v_df)
 
-    # Save CSV to S3 immediately
-    if len(csv_pdf) > 0:
-        csv_pdf_sorted = csv_pdf.sort_values(
+    # Write CSV immediately
+    if len(c_df) > 0:
+        c_df_sorted = c_df.sort_values(
             ["column_name", "value_count"],
             ascending=[True, False])
         csv_key = (OUTPUT_PREFIX + "csv_analysis/"
                    + st + "_column_value_mapping.csv")
-        s3c_main.put_object(
+        s3_client.put_object(
             Bucket=OUTPUT_BUCKET,
             Key=csv_key,
-            Body=csv_pdf_sorted.to_csv(index=False).encode("utf-8"),
+            Body=c_df_sorted.to_csv(index=False).encode("utf-8"),
             ContentType="text/csv")
-        print("CSV saved  rows=" + str(len(csv_pdf_sorted))
-              + "  -> " + csv_key)
-        print(csv_pdf_sorted.head(3).to_string(index=False))
+        print("CSV saved rows=" + str(len(c_df_sorted))
+              + " key=" + csv_key)
+        print(c_df_sorted.head(3).to_string(index=False))
 
-    # Summary row — all plain Python types
-    unique_col_names = dict()
-    for idx in range(len(profile_pdf)):
-        unique_col_names[profile_pdf.iloc[idx]["column_name"]] = 1
-    n_unique = safe_int(len(unique_col_names))
+    # Summary
+    unique_cols = {}
+    for idx in range(len(p_df)):
+        unique_cols[p_df.iloc[idx]["column_name"]] = 1
 
-    s_row = dict()
-    s_row["schema_type"]   = safe_str(st)
-    s_row["total_columns"] = safe_int(n_unique)
-    s_row["total_rows"]    = safe_int(total_rows)
-    s_row["file_count"]    = safe_int(len(entries))
-    s_row["date_count"]    = 1
-    s_row["date_min"]      = safe_str(DATE_FROM)
-    s_row["date_max"]      = safe_str(DATE_TO)
-    s_row["date_list"]     = safe_str(DATE_FROM)
-    s_row["analysed_at"]   = str(datetime.utcnow().isoformat() + "Z")
-    s_row["is_wide"]       = safe_str(str(is_wide))
-    all_summary_rows.append(s_row)
+    all_summary_rows.append({
+        "schema_type"  : to_str(st),
+        "total_columns": to_int(len(unique_cols)),
+        "total_rows"   : to_int(total_rows),
+        "file_count"   : to_int(len(entries)),
+        "date_count"   : 1,
+        "date_min"     : to_str(DATE_FROM),
+        "date_max"     : to_str(DATE_TO),
+        "date_list"    : to_str(DATE_FROM),
+        "analysed_at"  : str(datetime.utcnow().isoformat() + "Z"),
+        "is_wide"      : to_str(str(is_wide)),
+    })
 
-print("\nCELL 6 DONE  schemas=" + str(len(schema_types)))
+print("\nLOOP DONE schemas=" + str(len(schema_types)))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 7 — Combine all pandas DataFrames
-# ─────────────────────────────────────────────────────────────────────────────
-import pandas as pd
-
-if len(all_profile_pdfs) > 0:
-    final_profile = pd.concat(all_profile_pdfs, ignore_index=True, sort=False)
-else:
-    final_profile = pd.DataFrame()
-
-if len(all_values_pdfs) > 0:
-    final_values = pd.concat(all_values_pdfs, ignore_index=True, sort=False)
-else:
-    final_values = pd.DataFrame()
-
+# ==============================================================================
+# STEP 6 — Combine
+# ==============================================================================
+final_profile = pd.concat(all_profile_dfs,  ignore_index=True, sort=False) \
+                if all_profile_dfs else pd.DataFrame()
+final_values  = pd.concat(all_values_dfs,   ignore_index=True, sort=False) \
+                if all_values_dfs  else pd.DataFrame()
 final_summary = pd.DataFrame(all_summary_rows)
 
-print("CELL 7 DONE")
 print("profile rows=" + str(len(final_profile)))
 print("values  rows=" + str(len(final_values)))
 print("summary rows=" + str(len(final_summary)))
 print(final_summary.to_string(index=False))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 8 — Write Parquet to S3 using pyarrow (NO Spark createDataFrame)
-# ─────────────────────────────────────────────────────────────────────────────
-import io
-import boto3
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-def write_parquet_to_s3(pdf, bucket, key, int_cols, float_cols, str_cols):
-    """
-    Write a pandas DataFrame to S3 as Parquet using pyarrow directly.
-    No Spark createDataFrame — avoids all column validator errors.
-    """
-    import io as _io
-    import boto3 as _b3
-    import pandas as _pd
-    import pyarrow as _pa
-    import pyarrow.parquet as _pq
-
-    # Coerce types
+# ==============================================================================
+# STEP 7 — Write Parquet to S3 using pyarrow (zero Spark)
+# ==============================================================================
+def write_parquet(df, bucket, key, int_cols, float_cols):
+    if len(df) == 0:
+        return
+    pdf = df.copy()
     for c in list(pdf.columns):
         if c in int_cols:
-            pdf[c] = _pd.to_numeric(
+            pdf[c] = pd.to_numeric(
                 pdf[c], errors="coerce").fillna(0).astype("int64")
         elif c in float_cols:
-            pdf[c] = _pd.to_numeric(
+            pdf[c] = pd.to_numeric(
                 pdf[c], errors="coerce").fillna(0.0).astype("float64")
         else:
             pdf[c] = pdf[c].fillna("").astype(str)
 
-    # Write to in-memory buffer
-    buf   = _io.BytesIO()
-    table = _pa.Table.from_pandas(pdf, preserve_index=False)
-    _pq.write_table(table, buf)
+    buf   = io.BytesIO()
+    table = pa.Table.from_pandas(pdf, preserve_index=False)
+    pq.write_table(table, buf)
     buf.seek(0)
-
-    # Upload to S3
-    _b3.client("s3").put_object(
+    s3_client.put_object(
         Bucket=bucket, Key=key,
         Body=buf.read(),
         ContentType="application/octet-stream")
     buf.close()
-    print("Written -> s3://" + bucket + "/" + key)
+    print("Parquet written -> s3://" + bucket + "/" + key)
 
-
-PROFILE_INT   = ["total_rows", "null_count", "distinct_count"]
-PROFILE_FLOAT = ["null_pct"]
-PROFILE_STR   = ["schema_type","column_name","original_name","data_type",
-                 "min_value","max_value","top_value"]
-
-VALUES_INT    = ["value_count", "value_rank", "total_rows"]
-VALUES_FLOAT  = ["value_pct"]
-VALUES_STR    = ["schema_type","column_name","original_name",
-                 "data_type","value"]
-
-SUMMARY_INT   = ["total_columns","total_rows","file_count","date_count"]
-SUMMARY_STR   = ["schema_type","date_min","date_max","date_list",
-                 "analysed_at","is_wide"]
 
 base = OUTPUT_PREFIX + "quicksight_tables"
 
-# Write profile — one file per schema_type partition
+PROFILE_INT   = ["total_rows", "null_count", "distinct_count"]
+PROFILE_FLOAT = ["null_pct"]
+VALUES_INT    = ["value_count", "value_rank", "total_rows"]
+VALUES_FLOAT  = ["value_pct"]
+SUMMARY_INT   = ["total_columns", "total_rows", "file_count", "date_count"]
+
+# Profile — one file per schema_type
 if len(final_profile) > 0:
     st_list = list(final_profile["schema_type"].unique())
     for st in st_list:
         subset = final_profile[
             final_profile["schema_type"] == st].copy()
-        key = base + "/schema_column_profile/schema_type=" + st + "/data.parquet"
-        write_parquet_to_s3(
-            subset, OUTPUT_BUCKET, key,
-            PROFILE_INT, PROFILE_FLOAT, PROFILE_STR)
-print("schema_column_profile done")
+        key = (base + "/schema_column_profile/"
+               + "schema_type=" + st + "/data.parquet")
+        write_parquet(subset, OUTPUT_BUCKET, key, PROFILE_INT, PROFILE_FLOAT)
 
-# Write values — one file per schema_type partition
+# Values — one file per schema_type
 if len(final_values) > 0:
     st_list = list(final_values["schema_type"].unique())
     for st in st_list:
         subset = final_values[
             final_values["schema_type"] == st].copy()
-        key = base + "/schema_column_values/schema_type=" + st + "/data.parquet"
-        write_parquet_to_s3(
-            subset, OUTPUT_BUCKET, key,
-            VALUES_INT, VALUES_FLOAT, VALUES_STR)
-print("schema_column_values done")
+        key = (base + "/schema_column_values/"
+               + "schema_type=" + st + "/data.parquet")
+        write_parquet(subset, OUTPUT_BUCKET, key, VALUES_INT, VALUES_FLOAT)
 
-# Write summary — single file
+# Summary
 if len(final_summary) > 0:
     key = base + "/schema_summary/data.parquet"
-    write_parquet_to_s3(
-        final_summary.copy(), OUTPUT_BUCKET, key,
-        SUMMARY_INT, [], SUMMARY_STR)
-print("schema_summary done")
+    write_parquet(final_summary.copy(), OUTPUT_BUCKET, key, SUMMARY_INT, [])
 
-print("CELL 8 DONE")
+print("PARQUET WRITE DONE")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 9 — Glue Catalog registration
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-
+# ==============================================================================
+# STEP 8 — Glue Catalog
+# ==============================================================================
 glue_db     = "penske_iot_reporting"
 glue_client = boto3.client("glue")
 
 try:
     glue_client.create_database(
-        DatabaseInput={
-            "Name": glue_db,
-            "Description": "Penske IoT reporting",
-        })
+        DatabaseInput={"Name": glue_db,
+                       "Description": "Penske IoT reporting"})
     print("DB created: " + glue_db)
 except glue_client.exceptions.AlreadyExistsException:
-    print("DB exists:  " + glue_db)
+    print("DB exists: " + glue_db)
 
 base_s3 = "s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX + "quicksight_tables"
 
-def register_table(tbl_name, s3_path, col_defs, pk=None):
-    import boto3 as _b3
-    gc   = _b3.client("glue")
+def register_table(name, path, col_defs, pk=None):
     cols = []
     for col_name, col_type in col_defs:
         if col_name == pk:
             continue
-        entry = dict()
-        entry["Name"] = col_name
-        entry["Type"] = col_type
-        cols.append(entry)
+        cols.append({"Name": col_name, "Type": col_type})
 
-    if pk is not None:
-        part_keys = [{"Name": pk, "Type": "string"}]
-    else:
-        part_keys = []
+    part_keys = [{"Name": pk, "Type": "string"}] if pk else []
 
     tbl = {
-        "Name": tbl_name,
+        "Name": name,
         "StorageDescriptor": {
-            "Columns": cols,
-            "Location": s3_path,
-            "InputFormat": (
-                "org.apache.hadoop.hive.ql.io"
-                ".parquet.MapredParquetInputFormat"),
-            "OutputFormat": (
-                "org.apache.hadoop.hive.ql.io"
-                ".parquet.MapredParquetOutputFormat"),
+            "Columns": cols, "Location": path,
+            "InputFormat": ("org.apache.hadoop.hive.ql.io"
+                            ".parquet.MapredParquetInputFormat"),
+            "OutputFormat": ("org.apache.hadoop.hive.ql.io"
+                             ".parquet.MapredParquetOutputFormat"),
             "SerdeInfo": {
-                "SerializationLibrary": (
-                    "org.apache.hadoop.hive.ql.io"
-                    ".parquet.serde.ParquetHiveSerDe"),
+                "SerializationLibrary": ("org.apache.hadoop.hive.ql.io"
+                                         ".parquet.serde.ParquetHiveSerDe"),
                 "Parameters": {"serialization.format": "1"},
             },
-            "Compressed": False,
-            "StoredAsSubDirectories": True,
+            "Compressed": False, "StoredAsSubDirectories": True,
         },
         "PartitionKeys": part_keys,
         "TableType": "EXTERNAL_TABLE",
-        "Parameters": {
-            "classification": "parquet",
-            "EXTERNAL": "TRUE",
-        },
+        "Parameters": {"classification": "parquet", "EXTERNAL": "TRUE"},
     }
     try:
-        gc.create_table(DatabaseName=glue_db, TableInput=tbl)
-        print("Created " + glue_db + "." + tbl_name)
-    except gc.exceptions.AlreadyExistsException:
-        gc.update_table(DatabaseName=glue_db, TableInput=tbl)
-        print("Updated " + glue_db + "." + tbl_name)
+        glue_client.create_table(DatabaseName=glue_db, TableInput=tbl)
+        print("Created " + glue_db + "." + name)
+    except glue_client.exceptions.AlreadyExistsException:
+        glue_client.update_table(DatabaseName=glue_db, TableInput=tbl)
+        print("Updated " + glue_db + "." + name)
     try:
-        _b3.client("athena").start_query_execution(
-            QueryString=(
-                "MSCK REPAIR TABLE "
-                + glue_db + "." + tbl_name),
+        boto3.client("athena").start_query_execution(
+            QueryString="MSCK REPAIR TABLE " + glue_db + "." + name,
             ResultConfiguration={
-                "OutputLocation": (
-                    "s3://" + OUTPUT_BUCKET
-                    + "/athena-query-results/"),
-            })
-        print("Partitions repaired: " + tbl_name)
+                "OutputLocation": "s3://" + OUTPUT_BUCKET
+                                  + "/athena-query-results/"})
+        print("Partitions repaired: " + name)
     except Exception as e:
         print("Partition repair skipped: " + str(e))
 
 
 register_table(
-    "schema_column_profile",
-    base_s3 + "/schema_column_profile/",
+    "schema_column_profile", base_s3 + "/schema_column_profile/",
     [("schema_type","string"),("column_name","string"),
      ("original_name","string"),("data_type","string"),
      ("total_rows","bigint"),("null_count","bigint"),
      ("null_pct","double"),("distinct_count","bigint"),
      ("min_value","string"),("max_value","string"),
-     ("top_value","string")],
-    pk="schema_type")
+     ("top_value","string")], pk="schema_type")
 
 register_table(
-    "schema_column_values",
-    base_s3 + "/schema_column_values/",
+    "schema_column_values", base_s3 + "/schema_column_values/",
     [("schema_type","string"),("column_name","string"),
      ("original_name","string"),("data_type","string"),
      ("value","string"),("value_count","bigint"),
      ("value_pct","double"),("value_rank","bigint"),
-     ("total_rows","bigint")],
-    pk="schema_type")
+     ("total_rows","bigint")], pk="schema_type")
 
 register_table(
-    "schema_summary",
-    base_s3 + "/schema_summary/",
+    "schema_summary", base_s3 + "/schema_summary/",
     [("schema_type","string"),("total_columns","bigint"),
      ("total_rows","bigint"),("file_count","bigint"),
      ("date_count","bigint"),("date_min","string"),
      ("date_max","string"),("date_list","string"),
      ("analysed_at","string"),("is_wide","string")])
 
-job.commit()
-print("CELL 9 DONE — job committed")
+print("GLUE CATALOG DONE")
 print("CSV     -> s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX + "csv_analysis/")
-print("Parquet -> s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX + "quicksight_tables/")
+print("Parquet -> " + base_s3)
 print("Glue    -> " + glue_db)
+print("COMPLETE")
