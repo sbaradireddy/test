@@ -1,3 +1,10 @@
+UsageError: %%python is a cell magic, but the cell body is empty.
+TypeError: Invalid argument, not a string or column: 100.0 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
+
+
+
+
+
 %%python
 import boto3, pandas as pd, json, io
 from collections import defaultdict
