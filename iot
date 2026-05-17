@@ -710,3 +710,377 @@ print(f"""
 print("═"*68)
 job.commit()
 print("✅ Glue job committed")
+
+
+
+#################
+────────────────────────────────────────────────────────────────────────────
+# CELL 4 ── Type utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+def canonical_type(spark_field_type) -> str:
+    """Safe canonical type string from a Spark DataType object."""
+    t = str(spark_field_type).lower()
+    t = re.sub(r"type\b", "", t).strip()
+    t = re.sub(r"\(.*?\)", "", t).strip()
+    return t
+
+
+def is_simple_type(spark_field_type) -> bool:
+    """
+    Returns True if the column type is a scalar that can be safely
+    cast to string and used in groupBy/min/max.
+    Complex types (ArrayType, MapType, StructType) return False.
+    """
+    return not isinstance(
+        spark_field_type,
+        (ArrayType, MapType, T.StructType)
+    )
+
+
+def safe_string_col(col_name: str, field_type) -> "Column":
+    """
+    FIX FOR: "argument 'col' should be a Column or str, got float"
+
+    Always returns a Column object — never a raw Python value.
+    For complex types (array/map/struct) we use to_json() so they
+    can still be stored as a string representation.
+    For all scalar types we use .cast("string").
+    """
+    # Ensure col_name is truly a string (guards against float column names)
+    col_name = str(col_name)
+
+    if isinstance(field_type, (ArrayType, MapType, T.StructType)):
+        # to_json converts complex types to a JSON string safely
+        return F.to_json(F.col(col_name)).alias(col_name)
+    else:
+        return F.col(col_name).cast("string").alias(col_name)
+
+
+def safe_col_ref(col_name) -> str:
+    """
+    FIX: Guarantee col_name is a plain Python str before passing
+    to F.col(), df.select(), df.filter() etc.
+    PySpark raises TypeError if you pass a float or None here.
+    """
+    if col_name is None:
+        raise ValueError("col_name is None — check schema field iteration")
+    return str(col_name)
+
+
+print("✅ Type utilities loaded (with type-error guards)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 ── CORE ANALYSIS LOOP (all type-error fixes applied)
+# ─────────────────────────────────────────────────────────────────────────────
+
+all_profile_rows = []
+all_values_rows  = []
+all_summary_rows = []
+
+MAX_VAL = CONFIG["max_values_per_column"]
+TOP_N   = CONFIG["top_n_values_quicksight"]
+
+
+for st in schema_types:
+    entries = by_schema[st]
+    print(f"\n{'═'*62}")
+    print(f"  Processing: {st}  ({len(entries)} files)")
+    print(f"{'═'*62}")
+
+    # ── 5a: Load and union all files ─────────────────────────────────────────
+    dfs = []
+    for entry in entries:
+        try:
+            df_part = spark.read.parquet(entry["s3_uri"])
+            df_part = df_part \
+                .withColumn("_date", F.lit(entry["date_folder"])) \
+                .withColumn("_time", F.lit(entry["time_folder"]))
+            dfs.append(df_part)
+        except Exception as e:
+            print(f"  ⚠️  Skip {entry['s3_uri']}: {e}")
+
+    if not dfs:
+        print(f"  ⚠️  No data for {st}")
+        continue
+
+    df = dfs[0]
+    for dfi in dfs[1:]:
+        df = df.unionByName(dfi, allowMissingColumns=True)
+
+    total_rows = df.count()
+    print(f"  Rows : {total_rows:,}")
+
+    # ── 5b: Collect (field_name, field_type) pairs — SAFELY ──────────────────
+    # FIX: iterate schema.fields (StructField objects) not df.columns (strings).
+    # df.columns can sometimes contain non-string entries in edge cases;
+    # schema.fields always gives us typed StructField objects.
+    data_fields = [
+        (safe_col_ref(f.name), f.dataType)          # (str, DataType)
+        for f in df.schema.fields
+        if not str(f.name).startswith("_")          # skip internal cols
+    ]
+    print(f"  Columns : {len(data_fields)}")
+
+    csv_rows = []
+
+    for col_name, col_dtype in data_fields:
+        col_type_str = canonical_type(col_dtype)
+        print(f"    → {col_name:<40} [{col_type_str}]")
+
+        # ── 5c: Build a safe string expression for this column ────────────────
+        # This is the primary fix: we NEVER pass a raw value to F.col().
+        # safe_string_col() always returns a Column object.
+        str_expr = safe_string_col(col_name, col_dtype)
+
+        # ── 5d: Create a temp DF with just this column cast to string ─────────
+        # This avoids all downstream type confusion.
+        try:
+            col_df = df.select(str_expr).toDF("value")
+        except Exception as e:
+            print(f"      ⚠️  Cannot select {col_name}: {e} — skipping")
+            continue
+
+        # ── 5e: Null count ────────────────────────────────────────────────────
+        try:
+            null_count = col_df.filter(F.col("value").isNull()).count()
+        except Exception:
+            null_count = 0
+
+        # ── 5f: Distinct count ────────────────────────────────────────────────
+        try:
+            distinct_count = col_df.dropna().distinct().count()
+        except Exception:
+            distinct_count = 0
+
+        # ── 5g: Min / Max — only for simple scalar types ──────────────────────
+        # FIX: never call F.min/F.max on array/map/struct columns.
+        min_val, max_val = "", ""
+        if is_simple_type(col_dtype):
+            try:
+                stats = col_df.dropna().agg(
+                    F.min("value").alias("mn"),
+                    F.max("value").alias("mx"),
+                ).collect()[0]
+                min_val = str(stats["mn"]) if stats["mn"] is not None else ""
+                max_val = str(stats["mx"]) if stats["mx"] is not None else ""
+            except Exception as e:
+                print(f"      ⚠️  min/max failed for {col_name}: {e}")
+
+        # ── 5h: Value frequency (top N values) ───────────────────────────────
+        top_values = []
+        try:
+            top_values = (
+                col_df
+                .dropna()
+                .groupBy("value")
+                .agg(F.count("*").alias("cnt"))
+                .orderBy(F.col("cnt").desc())
+                .limit(MAX_VAL)
+                .collect()
+            )
+        except Exception as e:
+            print(f"      ⚠️  Value frequency failed for {col_name}: {e}")
+
+        top_value = str(top_values[0]["value"]) if top_values else ""
+
+        # ── 5i: Build CSV rows ────────────────────────────────────────────────
+        for row in top_values:
+            # FIX: coerce every value to Python native type before DataFrame
+            # creation.  Spark Row fields can sometimes be float/int; putting
+            # them in a dict that becomes a Pandas/Spark row as-is causes the
+            # "got float" error later.
+            raw_val = row["value"]
+            raw_cnt = row["cnt"]
+
+            val_str = str(raw_val) if raw_val is not None else ""
+            val_cnt = int(raw_cnt) if raw_cnt is not None else 0
+            val_pct = round((val_cnt / total_rows) * 100, 2) if total_rows > 0 else 0.0
+
+            csv_rows.append({
+                "schema_type"   : str(st),
+                "column_name"   : str(col_name),
+                "data_type"     : str(col_type_str),
+                "value"         : val_str,          # always str — no float leak
+                "value_count"   : val_cnt,          # always int
+                "value_pct"     : val_pct,          # always float
+                "total_rows"    : int(total_rows),
+                "null_count"    : int(null_count),
+                "distinct_count": int(distinct_count),
+                "min_value"     : str(min_val),
+                "max_value"     : str(max_val),
+            })
+
+        # ── 5j: Profile accumulator ───────────────────────────────────────────
+        all_profile_rows.append({
+            "schema_type"   : str(st),
+            "column_name"   : str(col_name),
+            "data_type"     : str(col_type_str),
+            "total_rows"    : int(total_rows),
+            "null_count"    : int(null_count),
+            "null_pct"      : round((null_count / total_rows) * 100, 2) if total_rows else 0.0,
+            "distinct_count": int(distinct_count),
+            "min_value"     : str(min_val),
+            "max_value"     : str(max_val),
+            "top_value"     : str(top_value),
+        })
+
+        # ── 5k: QuickSight values accumulator (top N) ─────────────────────────
+        for rank, row in enumerate(top_values[:TOP_N], start=1):
+            raw_val = row["value"]
+            raw_cnt = row["cnt"]
+            val_str = str(raw_val) if raw_val is not None else ""
+            val_cnt = int(raw_cnt) if raw_cnt is not None else 0
+            val_pct = round((val_cnt / total_rows) * 100, 2) if total_rows else 0.0
+
+            all_values_rows.append({
+                "schema_type"  : str(st),
+                "column_name"  : str(col_name),
+                "data_type"    : str(col_type_str),
+                "value"        : val_str,
+                "value_count"  : val_cnt,
+                "value_pct"    : val_pct,
+                "value_rank"   : int(rank),
+                "total_rows"   : int(total_rows),
+            })
+
+    # ── 5l: Write per-schema CSV ──────────────────────────────────────────────
+    if csv_rows:
+        import pandas as pd
+        csv_pdf = pd.DataFrame(csv_rows)
+
+        # FIX: ensure pandas dtypes are clean before to_csv
+        csv_pdf["value"]         = csv_pdf["value"].astype(str)
+        csv_pdf["value_count"]   = csv_pdf["value_count"].astype(int)
+        csv_pdf["value_pct"]     = csv_pdf["value_pct"].astype(float)
+        csv_pdf["null_count"]    = csv_pdf["null_count"].astype(int)
+        csv_pdf["distinct_count"]= csv_pdf["distinct_count"].astype(int)
+        csv_pdf["min_value"]     = csv_pdf["min_value"].astype(str)
+        csv_pdf["max_value"]     = csv_pdf["max_value"].astype(str)
+
+        csv_pdf = csv_pdf.sort_values(
+            ["schema_type", "column_name", "value_count"],
+            ascending=[True, True, False]
+        )
+
+        csv_bytes = csv_pdf.to_csv(index=False).encode("utf-8")
+        csv_key   = (
+            f"{CONFIG['output_prefix']}csv_analysis/"
+            f"{st}_column_value_mapping.csv"
+        )
+        s3c.put_object(
+            Bucket      = CONFIG["output_bucket"],
+            Key         = csv_key,
+            Body        = csv_bytes,
+            ContentType = "text/csv",
+        )
+        print(f"\n  ✅ CSV → s3://{CONFIG['output_bucket']}/{csv_key}")
+        print(f"     {len(csv_pdf):,} rows")
+        print(csv_pdf.head(8).to_string(index=False))
+
+    # ── 5m: Summary accumulator ───────────────────────────────────────────────
+    dates_st = sorted(set(f["date_folder"] for f in entries))
+    all_summary_rows.append({
+        "schema_type"   : str(st),
+        "total_columns" : int(len(data_fields)),
+        "total_rows"    : int(total_rows),
+        "file_count"    : int(len(entries)),
+        "date_count"    : int(len(dates_st)),
+        "date_min"      : str(dates_st[0]  if dates_st else ""),
+        "date_max"      : str(dates_st[-1] if dates_st else ""),
+        "date_list"     : str(",".join(dates_st)),
+        "analysed_at"   : str(datetime.utcnow().isoformat() + "Z"),
+    })
+
+print(f"\n✅ Analysis complete — {len(schema_types)} schema types processed")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 6 ── Build QuickSight Spark DataFrames with explicit schemas
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX: always supply an explicit StructType schema to createDataFrame.
+# Without it, Spark infers types from the first row — if the first row has
+# a None in a numeric field, Spark guesses StringType and later rows
+# with int/float values cause the "got float" TypeError.
+
+profile_schema = StructType([
+    StructField("schema_type",    StringType(),  True),
+    StructField("column_name",    StringType(),  True),
+    StructField("data_type",      StringType(),  True),
+    StructField("total_rows",     LongType(),    True),
+    StructField("null_count",     LongType(),    True),
+    StructField("null_pct",       DoubleType(),  True),
+    StructField("distinct_count", LongType(),    True),
+    StructField("min_value",      StringType(),  True),
+    StructField("max_value",      StringType(),  True),
+    StructField("top_value",      StringType(),  True),
+])
+
+values_schema = StructType([
+    StructField("schema_type",  StringType(),  True),
+    StructField("column_name",  StringType(),  True),
+    StructField("data_type",    StringType(),  True),
+    StructField("value",        StringType(),  True),
+    StructField("value_count",  LongType(),    True),
+    StructField("value_pct",    DoubleType(),  True),
+    StructField("value_rank",   IntegerType(), True),
+    StructField("total_rows",   LongType(),    True),
+])
+
+summary_schema = StructType([
+    StructField("schema_type",    StringType(),  True),
+    StructField("total_columns",  IntegerType(), True),
+    StructField("total_rows",     LongType(),    True),
+    StructField("file_count",     IntegerType(), True),
+    StructField("date_count",     IntegerType(), True),
+    StructField("date_min",       StringType(),  True),
+    StructField("date_max",       StringType(),  True),
+    StructField("date_list",      StringType(),  True),
+    StructField("analysed_at",    StringType(),  True),
+])
+
+
+def safe_rows(rows, schema):
+    """
+    FIX: coerce every row dict to match the StructType exactly.
+    Maps each field to the correct Python type so Spark's createDataFrame
+    never receives a float where it expects a string (or vice versa).
+    """
+    type_coerce = {
+        "StringType()" : lambda v: str(v)   if v is not None else None,
+        "LongType()"   : lambda v: int(v)   if v is not None else None,
+        "IntegerType()": lambda v: int(v)   if v is not None else None,
+        "DoubleType()" : lambda v: float(v) if v is not None else None,
+        "FloatType()"  : lambda v: float(v) if v is not None else None,
+        "BooleanType()": lambda v: bool(v)  if v is not None else None,
+    }
+    clean = []
+    for row in rows:
+        new_row = {}
+        for field in schema.fields:
+            raw  = row.get(field.name)
+            conv = type_coerce.get(str(field.dataType), lambda v: v)
+            new_row[field.name] = conv(raw)
+        clean.append(new_row)
+    return clean
+
+
+profile_df = spark.createDataFrame(safe_rows(all_profile_rows, profile_schema), schema=profile_schema)
+values_df  = spark.createDataFrame(safe_rows(all_values_rows,  values_schema),  schema=values_schema)
+summary_df = spark.createDataFrame(safe_rows(all_summary_rows, summary_schema), schema=summary_schema)
+
+print("✅ DataFrames created with explicit schemas")
+print(f"   profile_df : {profile_df.count():,} rows")
+print(f"   values_df  : {values_df.count():,} rows")
+print(f"   summary_df : {summary_df.count():,} rows")
+
+print("\n📋 schema_column_profile (sample):")
+profile_df.show(10, truncate=False)
+
+print("\n📋 schema_column_values (sample):")
+values_df.show(10, truncate=False)
+
+print("\n📋 schema_summary:")
+summary_df.show(truncate=False)
+
