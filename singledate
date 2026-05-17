@@ -1,3 +1,6 @@
+
+TypeError: Invalid argument, not a string or column: 46.607421875 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
+
 # ==============================================================================
 # PENSKE IOT — Schema Analysis
 # Fix: max() and min() shadowed by PySpark — use sorted() instead
