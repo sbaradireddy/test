@@ -1,0 +1,785 @@
+# ==============================================================================
+# AWS GLUE NOTEBOOK — Penske IoT Schema Analysis + QuickSight Tables
+# VERSION: Wide-Schema / Exploded-Array Fix
+# ==============================================================================
+# ROOT CAUSE (confirmed from debug output):
+#   SchemaType21-26 have 500-700+ columns because the original JSON array
+#   campaignTargets[0..N] was flattened into individual columns:
+#     campaignTargets_0_matchState, campaignTargets_1_matchState, ...
+#   Running a separate Spark job per column (700 jobs) exhausts the driver.
+#   The PySparkTypeError is a symptom of driver OOM / plan explosion.
+#
+# FIX STRATEGY:
+#   1. Detect "wide" schemas (> WIDE_THRESHOLD columns).
+#   2. For wide schemas: use stack()/unpivot to melt all columns into
+#      (col_name, value) rows IN A SINGLE SPARK JOB, then analyse in bulk.
+#   3. For normal schemas: use the fast per-column approach as before.
+#   4. For array-indexed schemas (campaignTargets_0_, _1_, ...):
+#      detect the logical field name (e.g. "matchState") and group
+#      values across all array positions — far more useful for reporting.
+# ==============================================================================
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 1 ── Imports
+# ─────────────────────────────────────────────────────────────────────────────
+import sys, re, json
+from datetime import datetime
+from collections import defaultdict
+
+import boto3
+from pyspark.context import SparkContext
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField,
+    StringType, IntegerType, LongType,
+    DoubleType, FloatType, BooleanType,
+    TimestampType, DateType,
+    ArrayType, MapType, BinaryType,
+)
+
+from awsglue.context import GlueContext
+from awsglue.job import Job
+
+sc          = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark       = glueContext.spark_session
+job         = Job(glueContext)
+
+# Increase driver memory for wide schemas
+spark.conf.set("spark.sql.shuffle.partitions", "10")
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+
+print("✅ Imports OK — Spark", spark.version)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 2 ── Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+CONFIG = {
+    "source_bucket"           : "pske-stg-maintenance",
+    "source_prefix"           : "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.campaigns.events/",
+    "schema_type_regex"       : r"^(SchemaType\d+)",
+    "date_from"               : None,
+    "date_to"                 : None,
+
+    # Schemas with more columns than this are treated as "wide"
+    # and processed via bulk unpivot instead of per-column loops
+    "wide_schema_threshold"   : 50,
+
+    # Max distinct values per logical column in output
+    "max_values_per_column"   : 200,
+    # Top N for QuickSight values table
+    "top_n_values_quicksight" : 50,
+
+    "glue_database"           : "penske_iot_reporting",
+    "output_bucket"           : "pske-stg-maintenance",
+    "output_prefix"           : "reporting-output/",
+}
+
+s3c = boto3.client("s3")
+print("✅ Config loaded")
+print(f"   Wide schema threshold : {CONFIG['wide_schema_threshold']} columns")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 3 ── S3 file discovery
+# ─────────────────────────────────────────────────────────────────────────────
+def list_parquet_files(bucket, prefix, date_from, date_to, schema_regex):
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    files = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.lower().endswith(".parquet"):
+                continue
+            relative = key[len(prefix):].strip("/")
+            parts    = relative.split("/")
+            if len(parts) < 3:
+                continue
+            date_folder = parts[0]
+            time_folder = parts[1]
+            filename    = parts[-1]
+            if date_from and date_folder < date_from:
+                continue
+            if date_to   and date_folder > date_to:
+                continue
+            stem  = filename.rsplit(".parquet", 1)[0]
+            match = re.match(schema_regex, stem, re.IGNORECASE)
+            schema_type = match.group(1) if match else stem
+            files.append({
+                "s3_uri"      : f"s3://{bucket}/{key}",
+                "date_folder" : date_folder,
+                "time_folder" : time_folder,
+                "filename"    : filename,
+                "schema_type" : schema_type,
+            })
+    return files
+
+
+all_files = list_parquet_files(
+    CONFIG["source_bucket"], CONFIG["source_prefix"],
+    CONFIG["date_from"],     CONFIG["date_to"],
+    CONFIG["schema_type_regex"],
+)
+
+by_schema    = defaultdict(list)
+for f in all_files:
+    by_schema[f["schema_type"]].append(f)
+schema_types = sorted(by_schema.keys())
+
+print(f"✅ {len(all_files)} files  |  {len(schema_types)} schema types")
+for st in schema_types:
+    dates = set(f["date_folder"] for f in by_schema[st])
+    print(f"   {st:<24} {len(by_schema[st]):>5} files  {len(dates):>4} dates")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 4 ── Helper: detect array-indexed column pattern
+#            campaignTargets_0_matchState → logical name = "campaignTargets_matchState"
+#            campaign_name               → logical name = "campaign_name"  (unchanged)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARRAY_IDX_RE = re.compile(r"^(.+?)_\d+_(.+)$")
+
+def logical_name(col_name: str) -> str:
+    """
+    Strip array index from flattened array column names.
+    campaignTargets_0_matchState  → campaignTargets_matchState
+    campaignTargets_42_target_id  → campaignTargets_target_id
+    campaign_name                 → campaign_name
+    """
+    m = ARRAY_IDX_RE.match(col_name)
+    if m:
+        return f"{m.group(1)}_{m.group(2)}"
+    return col_name
+
+
+def canonical_type(spark_field_type) -> str:
+    t = str(spark_field_type).lower()
+    t = re.sub(r"type\b", "", t).strip()
+    t = re.sub(r"\(.*?\)", "", t).strip()
+    return t
+
+
+print("✅ Helpers ready")
+print(f"   logical_name test:")
+print(f"     'campaignTargets_0_matchState'  → '{logical_name('campaignTargets_0_matchState')}'")
+print(f"     'campaignTargets_42_target_id'  → '{logical_name('campaignTargets_42_target_id')}'")
+print(f"     'campaign_name'                 → '{logical_name('campaign_name')}'")
+print(f"     'campaign_targetCount'          → '{logical_name('campaign_targetCount')}'")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 5 ── Bulk unpivot analyser (for wide schemas)
+#
+#  Instead of 700 separate Spark jobs (one per column), this function:
+#    1. Casts ALL columns to string in one select
+#    2. Uses stack() to unpivot: (col_name, value) — ONE Spark job
+#    3. Maps physical col_name → logical_name (strips array index)
+#    4. Groups by logical_name and value → counts
+#    Returns a list of profile rows and value rows ready for accumulation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyse_wide_schema(df, schema_type, total_rows, max_val, top_n):
+    """
+    Bulk unpivot analysis for schemas with many columns.
+    Returns (profile_rows, values_rows, csv_rows).
+    """
+    # Step 1: cast all non-internal columns to string, collect names
+    data_cols = [f.name for f in df.schema.fields if not f.name.startswith("_")]
+    n = len(data_cols)
+    print(f"    Wide schema: {n} columns → bulk unpivot")
+
+    # Step 2: build stack() expression
+    # stack(N, 'col1', col1, 'col2', col2, ...) AS (col_name, value)
+    # Split into batches of 200 to avoid query plan explosion
+    BATCH = 200
+    long_dfs = []
+
+    for batch_start in range(0, n, BATCH):
+        batch_cols = data_cols[batch_start : batch_start + BATCH]
+        stack_args = ", ".join(
+            f"'{c}', CAST(`{c}` AS STRING)"
+            for c in batch_cols
+        )
+        stack_expr = f"stack({len(batch_cols)}, {stack_args}) AS (col_name, value)"
+        try:
+            batch_df = df.select(F.expr(stack_expr))
+            long_dfs.append(batch_df)
+        except Exception as e:
+            print(f"    ⚠️  Batch {batch_start}-{batch_start+BATCH} failed: {e}")
+
+    if not long_dfs:
+        print(f"    ⚠️  All batches failed for {schema_type}")
+        return [], [], []
+
+    # Union all batches into one long DF
+    long_df = long_dfs[0]
+    for ldf in long_dfs[1:]:
+        long_df = long_df.union(ldf)
+
+    # Step 3: add logical name column (strips array index)
+    logical_name_udf = F.udf(logical_name, StringType())
+    long_df = long_df.withColumn("logical_col", logical_name_udf(F.col("col_name")))
+
+    # Step 4: group by (logical_col, value) → count
+    # This is ONE Spark job covering all columns
+    freq_df = (
+        long_df
+        .filter(F.col("value").isNotNull() & (F.col("value") != ""))
+        .groupBy("logical_col", "value")
+        .agg(F.count("*").alias("cnt"))
+        .cache()
+    )
+
+    # Step 5: null counts per logical column
+    null_df = (
+        long_df
+        .filter(F.col("value").isNull() | (F.col("value") == ""))
+        .groupBy("logical_col")
+        .agg(F.count("*").alias("null_cnt"))
+    )
+
+    # Step 6: distinct count per logical column
+    distinct_df = (
+        freq_df
+        .groupBy("logical_col")
+        .agg(F.countDistinct("value").alias("distinct_cnt"))
+    )
+
+    # Collect frequency (top N per logical col)
+    # Use window function to rank
+    from pyspark.sql.window import Window
+    w = Window.partitionBy("logical_col").orderBy(F.col("cnt").desc())
+    top_df = (
+        freq_df
+        .withColumn("rank", F.row_number().over(w))
+        .filter(F.col("rank") <= max_val)
+    )
+
+    # Min/Max per logical col (from string sort)
+    minmax_df = (
+        freq_df
+        .groupBy("logical_col")
+        .agg(
+            F.min("value").alias("min_val"),
+            F.max("value").alias("max_val"),
+            F.sum("cnt").alias("total_non_null"),
+        )
+    )
+
+    # Collect all to driver
+    top_rows     = top_df.collect()
+    null_rows    = {r["logical_col"]: int(r["null_cnt"])    for r in null_df.collect()}
+    distinct_rows= {r["logical_col"]: int(r["distinct_cnt"])for r in distinct_df.collect()}
+    minmax_rows  = {r["logical_col"]: r                     for r in minmax_df.collect()}
+
+    freq_df.unpersist()
+
+    # Group top_rows by logical_col
+    by_col = defaultdict(list)
+    for r in top_rows:
+        by_col[r["logical_col"]].append(r)
+
+    profile_rows = []
+    values_rows  = []
+    csv_rows     = []
+
+    for lc in sorted(by_col.keys()):
+        rows       = by_col[lc]
+        null_count = null_rows.get(lc, 0)
+        dist_count = distinct_rows.get(lc, 0)
+        mm         = minmax_rows.get(lc)
+        min_val    = str(mm["min_val"]) if mm and mm["min_val"] else ""
+        max_val    = str(mm["max_val"]) if mm and mm["max_val"] else ""
+        top_value  = str(rows[0]["value"]) if rows else ""
+        null_pct   = round((null_count / total_rows) * 100, 2) if total_rows else 0.0
+
+        profile_rows.append({
+            "schema_type"   : str(schema_type),
+            "column_name"   : str(lc),
+            "original_name" : str(lc),
+            "data_type"     : "string",
+            "total_rows"    : int(total_rows),
+            "null_count"    : int(null_count),
+            "null_pct"      : null_pct,
+            "distinct_count": int(dist_count),
+            "min_value"     : min_val,
+            "max_value"     : max_val,
+            "top_value"     : top_value,
+        })
+
+        for rank, row in enumerate(rows[:top_n], start=1):
+            val_str = str(row["value"]) if row["value"] else ""
+            val_cnt = int(row["cnt"])
+            val_pct = round((val_cnt / total_rows) * 100, 2) if total_rows else 0.0
+
+            values_rows.append({
+                "schema_type"  : str(schema_type),
+                "column_name"  : str(lc),
+                "original_name": str(lc),
+                "data_type"    : "string",
+                "value"        : val_str,
+                "value_count"  : val_cnt,
+                "value_pct"    : val_pct,
+                "value_rank"   : int(rank),
+                "total_rows"   : int(total_rows),
+            })
+
+            if rank <= max_val:
+                csv_rows.append({
+                    "schema_type"   : str(schema_type),
+                    "column_name"   : str(lc),
+                    "original_name" : str(lc),
+                    "data_type"     : "string",
+                    "value"         : val_str,
+                    "value_count"   : val_cnt,
+                    "value_pct"     : val_pct,
+                    "total_rows"    : int(total_rows),
+                    "null_count"    : int(null_count),
+                    "distinct_count": int(dist_count),
+                    "min_value"     : min_val,
+                    "max_value"     : max_val,
+                })
+
+    print(f"    ✅ Wide analysis done: {len(profile_rows)} logical columns")
+    return profile_rows, values_rows, csv_rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 6 ── Narrow schema analyser (per-column, for schemas ≤ threshold)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyse_narrow_schema(df, schema_type, total_rows, max_val, top_n):
+    """Per-column analysis for schemas with few columns."""
+    data_fields = [
+        (f.name, f.dataType)
+        for f in df.schema.fields
+        if not f.name.startswith("_")
+    ]
+
+    profile_rows = []
+    values_rows  = []
+    csv_rows     = []
+
+    for col_name, col_dtype in data_fields:
+        col_type_str = canonical_type(col_dtype)
+
+        try:
+            col_df = df.select(
+                F.col(f"`{col_name}`").cast("string").alias("value")
+            ).toDF("value")
+        except Exception as e:
+            print(f"    ⚠️  select failed [{col_name}]: {e}")
+            continue
+
+        try:
+            null_count = col_df.filter(F.col("value").isNull()).count()
+        except Exception:
+            null_count = 0
+
+        try:
+            distinct_count = col_df.dropna().distinct().count()
+        except Exception:
+            distinct_count = 0
+
+        min_val, max_val_s = "", ""
+        try:
+            stats = col_df.dropna().agg(
+                F.min("value").alias("mn"),
+                F.max("value").alias("mx"),
+            ).collect()[0]
+            min_val   = str(stats["mn"]) if stats["mn"] else ""
+            max_val_s = str(stats["mx"]) if stats["mx"] else ""
+        except Exception:
+            pass
+
+        top_values = []
+        try:
+            top_values = (
+                col_df.dropna()
+                .groupBy("value")
+                .agg(F.count("*").alias("cnt"))
+                .orderBy(F.col("cnt").desc())
+                .limit(max_val)
+                .collect()
+            )
+        except Exception as e:
+            print(f"    ⚠️  value freq failed [{col_name}]: {e}")
+
+        top_value  = str(top_values[0]["value"]) if top_values else ""
+        null_pct   = round((null_count / total_rows) * 100, 2) if total_rows else 0.0
+
+        print(f"    ✓ {col_name:<55} null={null_count}  dist={distinct_count}  top='{top_value[:25]}'")
+
+        profile_rows.append({
+            "schema_type"   : str(schema_type),
+            "column_name"   : str(col_name),
+            "original_name" : str(col_name),
+            "data_type"     : str(col_type_str),
+            "total_rows"    : int(total_rows),
+            "null_count"    : int(null_count),
+            "null_pct"      : null_pct,
+            "distinct_count": int(distinct_count),
+            "min_value"     : str(min_val),
+            "max_value"     : str(max_val_s),
+            "top_value"     : str(top_value),
+        })
+
+        for rank, row in enumerate(top_values[:top_n], start=1):
+            val_str = str(row["value"]) if row["value"] else ""
+            val_cnt = int(row["cnt"])
+            val_pct = round((val_cnt / total_rows) * 100, 2) if total_rows else 0.0
+            values_rows.append({
+                "schema_type"  : str(schema_type),
+                "column_name"  : str(col_name),
+                "original_name": str(col_name),
+                "data_type"    : str(col_type_str),
+                "value"        : val_str,
+                "value_count"  : val_cnt,
+                "value_pct"    : val_pct,
+                "value_rank"   : int(rank),
+                "total_rows"   : int(total_rows),
+            })
+
+        for row in top_values:
+            val_str = str(row["value"]) if row["value"] else ""
+            val_cnt = int(row["cnt"])
+            val_pct = round((val_cnt / total_rows) * 100, 2) if total_rows else 0.0
+            csv_rows.append({
+                "schema_type"   : str(schema_type),
+                "column_name"   : str(col_name),
+                "original_name" : str(col_name),
+                "data_type"     : str(col_type_str),
+                "value"         : val_str,
+                "value_count"   : val_cnt,
+                "value_pct"     : val_pct,
+                "total_rows"    : int(total_rows),
+                "null_count"    : int(null_count),
+                "distinct_count": int(distinct_count),
+                "min_value"     : str(min_val),
+                "max_value"     : str(max_val_s),
+            })
+
+    return profile_rows, values_rows, csv_rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 7 ── Main analysis loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+all_profile_rows = []
+all_values_rows  = []
+all_summary_rows = []
+
+WIDE  = CONFIG["wide_schema_threshold"]
+MAXV  = CONFIG["max_values_per_column"]
+TOPN  = CONFIG["top_n_values_quicksight"]
+
+for st in schema_types:
+    entries = by_schema[st]
+    print(f"\n{'═'*62}")
+    print(f"  Processing : {st}  ({len(entries)} files)")
+    print(f"{'═'*62}")
+
+    # Load and union
+    dfs = []
+    for entry in entries:
+        try:
+            df_part = spark.read.parquet(entry["s3_uri"])
+            df_part = (df_part
+                       .withColumn("_date", F.lit(entry["date_folder"]))
+                       .withColumn("_time", F.lit(entry["time_folder"])))
+            dfs.append(df_part)
+        except Exception as e:
+            print(f"  ⚠️  Skip {entry['s3_uri']}: {e}")
+
+    if not dfs:
+        print(f"  ⚠️  No data for {st}")
+        continue
+
+    df = dfs[0]
+    for dfi in dfs[1:]:
+        df = df.unionByName(dfi, allowMissingColumns=True)
+
+    total_rows  = df.count()
+    data_cols   = [f for f in df.schema.fields if not f.name.startswith("_")]
+    num_cols    = len(data_cols)
+    is_wide     = num_cols > WIDE
+
+    print(f"  Rows : {total_rows:,}  |  Columns : {num_cols}  |  Mode : {'WIDE (bulk unpivot)' if is_wide else 'NARROW (per-column)'}")
+
+    if is_wide:
+        p_rows, v_rows, csv_rows = analyse_wide_schema(df, st, total_rows, MAXV, TOPN)
+    else:
+        p_rows, v_rows, csv_rows = analyse_narrow_schema(df, st, total_rows, MAXV, TOPN)
+
+    all_profile_rows.extend(p_rows)
+    all_values_rows.extend(v_rows)
+
+    # Write per-schema CSV
+    if csv_rows:
+        import pandas as pd
+        csv_pdf = pd.DataFrame(csv_rows)
+        for c in ["value", "schema_type", "column_name", "original_name",
+                  "data_type", "min_value", "max_value"]:
+            if c in csv_pdf.columns:
+                csv_pdf[c] = csv_pdf[c].astype(str)
+        for c in ["value_count", "total_rows", "null_count", "distinct_count"]:
+            if c in csv_pdf.columns:
+                csv_pdf[c] = csv_pdf[c].astype(int)
+        if "value_pct" in csv_pdf.columns:
+            csv_pdf["value_pct"] = csv_pdf["value_pct"].astype(float)
+
+        csv_pdf = csv_pdf.sort_values(
+            ["column_name", "value_count"], ascending=[True, False]
+        )
+        csv_key = (
+            f"{CONFIG['output_prefix']}csv_analysis/"
+            f"{st}_column_value_mapping.csv"
+        )
+        s3c.put_object(
+            Bucket=CONFIG["output_bucket"], Key=csv_key,
+            Body=csv_pdf.to_csv(index=False).encode("utf-8"),
+            ContentType="text/csv",
+        )
+        print(f"\n  ✅ CSV ({len(csv_pdf):,} rows) → s3://{CONFIG['output_bucket']}/{csv_key}")
+        print(csv_pdf.head(5).to_string(index=False))
+
+    # Summary
+    dates_st = sorted(set(f["date_folder"] for f in entries))
+    all_summary_rows.append({
+        "schema_type"  : str(st),
+        "total_columns": int(len(set(r["column_name"] for r in p_rows))),
+        "total_rows"   : int(total_rows),
+        "file_count"   : int(len(entries)),
+        "date_count"   : int(len(dates_st)),
+        "date_min"     : str(dates_st[0]  if dates_st else ""),
+        "date_max"     : str(dates_st[-1] if dates_st else ""),
+        "date_list"    : str(",".join(dates_st)),
+        "analysed_at"  : str(datetime.utcnow().isoformat() + "Z"),
+        "is_wide"      : str(is_wide),
+    })
+
+print(f"\n✅ All {len(schema_types)} schema types processed")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 8 ── Build QuickSight DataFrames
+# ─────────────────────────────────────────────────────────────────────────────
+
+profile_schema = StructType([
+    StructField("schema_type",    StringType(),  True),
+    StructField("column_name",    StringType(),  True),
+    StructField("original_name",  StringType(),  True),
+    StructField("data_type",      StringType(),  True),
+    StructField("total_rows",     LongType(),    True),
+    StructField("null_count",     LongType(),    True),
+    StructField("null_pct",       DoubleType(),  True),
+    StructField("distinct_count", LongType(),    True),
+    StructField("min_value",      StringType(),  True),
+    StructField("max_value",      StringType(),  True),
+    StructField("top_value",      StringType(),  True),
+])
+
+values_schema = StructType([
+    StructField("schema_type",   StringType(),  True),
+    StructField("column_name",   StringType(),  True),
+    StructField("original_name", StringType(),  True),
+    StructField("data_type",     StringType(),  True),
+    StructField("value",         StringType(),  True),
+    StructField("value_count",   LongType(),    True),
+    StructField("value_pct",     DoubleType(),  True),
+    StructField("value_rank",    IntegerType(), True),
+    StructField("total_rows",    LongType(),    True),
+])
+
+summary_schema = StructType([
+    StructField("schema_type",   StringType(),  True),
+    StructField("total_columns", IntegerType(), True),
+    StructField("total_rows",    LongType(),    True),
+    StructField("file_count",    IntegerType(), True),
+    StructField("date_count",    IntegerType(), True),
+    StructField("date_min",      StringType(),  True),
+    StructField("date_max",      StringType(),  True),
+    StructField("date_list",     StringType(),  True),
+    StructField("analysed_at",   StringType(),  True),
+    StructField("is_wide",       StringType(),  True),
+])
+
+
+def safe_rows(rows, schema):
+    coerce = {
+        "StringType()" : lambda v: str(v)   if v is not None else None,
+        "LongType()"   : lambda v: int(v)   if v is not None else None,
+        "IntegerType()": lambda v: int(v)   if v is not None else None,
+        "DoubleType()" : lambda v: float(v) if v is not None else None,
+        "FloatType()"  : lambda v: float(v) if v is not None else None,
+        "BooleanType()": lambda v: bool(v)  if v is not None else None,
+    }
+    clean = []
+    for row in rows:
+        new_row = {}
+        for field in schema.fields:
+            raw = row.get(field.name)
+            fn  = coerce.get(str(field.dataType), lambda v: v)
+            new_row[field.name] = fn(raw)
+        clean.append(new_row)
+    return clean
+
+
+profile_df = spark.createDataFrame(safe_rows(all_profile_rows, profile_schema), schema=profile_schema)
+values_df  = spark.createDataFrame(safe_rows(all_values_rows,  values_schema),  schema=values_schema)
+summary_df = spark.createDataFrame(safe_rows(all_summary_rows, summary_schema), schema=summary_schema)
+
+print("✅ DataFrames created")
+print(f"   profile_df : {profile_df.count():,} rows")
+print(f"   values_df  : {values_df.count():,} rows")
+print(f"   summary_df : {summary_df.count():,} rows")
+
+print("\n📋 schema_summary:")
+summary_df.show(truncate=False)
+
+print("\n📋 schema_column_profile (sample):")
+profile_df.show(10, truncate=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 9 ── Write Parquet tables to S3
+# ─────────────────────────────────────────────────────────────────────────────
+
+base         = f"s3://{CONFIG['output_bucket']}/{CONFIG['output_prefix']}quicksight_tables"
+profile_path = f"{base}/schema_column_profile/"
+values_path  = f"{base}/schema_column_values/"
+summary_path = f"{base}/schema_summary/"
+
+(profile_df.repartition(1, "schema_type")
+ .write.partitionBy("schema_type").mode("overwrite").parquet(profile_path))
+print(f"✅ schema_column_profile → {profile_path}")
+
+(values_df.repartition(1, "schema_type")
+ .write.partitionBy("schema_type").mode("overwrite").parquet(values_path))
+print(f"✅ schema_column_values  → {values_path}")
+
+(summary_df.coalesce(1).write.mode("overwrite").parquet(summary_path))
+print(f"✅ schema_summary        → {summary_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 10 ── Glue Catalog registration
+# ─────────────────────────────────────────────────────────────────────────────
+
+glue_db     = CONFIG["glue_database"]
+glue_client = boto3.client("glue")
+
+try:
+    glue_client.create_database(
+        DatabaseInput={"Name": glue_db, "Description": "Penske IoT reporting"})
+    print(f"✅ Glue database created: {glue_db}")
+except glue_client.exceptions.AlreadyExistsException:
+    print(f"ℹ️  Glue database exists : {glue_db}")
+
+
+def register_glue_table(table_name, s3_location, schema, partition_key=None):
+    GLUE_TYPE = {
+        "StringType()" : "string", "LongType()"   : "bigint",
+        "IntegerType()": "int",    "DoubleType()"  : "double",
+        "FloatType()"  : "float",  "BooleanType()" : "boolean",
+    }
+    cols = [
+        {"Name": f.name, "Type": GLUE_TYPE.get(str(f.dataType), "string")}
+        for f in schema.fields if f.name != partition_key
+    ]
+    part_keys = [{"Name": partition_key, "Type": "string"}] if partition_key else []
+    tbl = {
+        "Name": table_name,
+        "StorageDescriptor": {
+            "Columns": cols, "Location": s3_location,
+            "InputFormat" : "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+            "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+            "SerdeInfo": {
+                "SerializationLibrary":
+                    "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                "Parameters": {"serialization.format": "1"},
+            },
+            "Compressed": False, "StoredAsSubDirectories": True,
+        },
+        "PartitionKeys": part_keys,
+        "TableType"    : "EXTERNAL_TABLE",
+        "Parameters"   : {"classification": "parquet", "EXTERNAL": "TRUE"},
+    }
+    try:
+        glue_client.create_table(DatabaseName=glue_db, TableInput=tbl)
+        print(f"  ✅ Created  {glue_db}.{table_name}")
+    except glue_client.exceptions.AlreadyExistsException:
+        glue_client.update_table(DatabaseName=glue_db, TableInput=tbl)
+        print(f"  ✅ Updated  {glue_db}.{table_name}")
+    try:
+        boto3.client("athena").start_query_execution(
+            QueryString         = f"MSCK REPAIR TABLE {glue_db}.{table_name}",
+            ResultConfiguration = {"OutputLocation":
+                f"s3://{CONFIG['output_bucket']}/athena-query-results/"},
+        )
+        print(f"     Partition repair triggered")
+    except Exception as e:
+        print(f"     Partition repair skipped: {e}")
+
+
+register_glue_table("schema_column_profile", profile_path, profile_schema, "schema_type")
+register_glue_table("schema_column_values",  values_path,  values_schema,  "schema_type")
+register_glue_table("schema_summary",        summary_path, summary_schema)
+print(f"\n✅ All tables registered — database: {glue_db}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 11 ── QuickSight manifests
+# ─────────────────────────────────────────────────────────────────────────────
+
+for st in schema_types:
+    manifest = {
+        "fileLocations": [{"URIs": [
+            f"s3://{CONFIG['output_bucket']}/"
+            f"{CONFIG['output_prefix']}csv_analysis/"
+            f"{st}_column_value_mapping.csv"
+        ]}],
+        "globalUploadSettings": {
+            "format": "CSV", "delimiter": ",",
+            "textqualifier": "\"", "containsHeader": "true",
+        },
+    }
+    key = f"{CONFIG['output_prefix']}quicksight_manifests/{st}_manifest.json"
+    s3c.put_object(
+        Bucket=CONFIG["output_bucket"], Key=key,
+        Body=json.dumps(manifest, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+print(f"✅ Manifests written for {len(schema_types)} schema types")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CELL 12 ── Final summary
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("\n" + "═"*66)
+print("  COMPLETE")
+print("═"*66)
+for st in schema_types:
+    p = [r for r in all_profile_rows if r["schema_type"] == st]
+    v = [r for r in all_values_rows  if r["schema_type"] == st]
+    mode = "wide" if len(p) > 0 and by_schema[st] else "narrow"
+    print(f"\n  {st}")
+    print(f"    Logical columns  : {len(p)}")
+    print(f"    Value-map rows   : {len(v)}")
+
+print(f"""
+  Outputs:
+    CSV      → s3://{CONFIG['output_bucket']}/{CONFIG['output_prefix']}csv_analysis/
+    Parquet  → s3://{CONFIG['output_bucket']}/{CONFIG['output_prefix']}quicksight_tables/
+    Glue DB  → {CONFIG['glue_database']}
+               schema_summary | schema_column_profile | schema_column_values
+""")
+print("═"*66)
+job.commit()
+print("✅ Job committed")
