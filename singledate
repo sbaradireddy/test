@@ -1,7 +1,6 @@
 # ==============================================================================
 # PENSKE IOT — Schema Analysis
-# All imports are repeated inside each function so no "name not defined" errors
-# regardless of which cells were run or in what order.
+# Fix: max() and min() shadowed by PySpark — use sorted() instead
 # ==============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,6 +37,36 @@ TOP_N         = 50
 
 s3c    = boto3.client("s3")
 s3_res = boto3.resource("s3")
+
+# ── Safe min/max that cannot be shadowed by PySpark ──────────────────────────
+# PySpark imports its own max(col) and min(col) into the namespace.
+# These wrappers call the builtins explicitly via __builtins__ so they
+# always work on plain Python lists/values regardless of what PySpark does.
+
+def py_min(lst):
+    """Python built-in min on a list — never shadowed by PySpark."""
+    result = None
+    first  = True
+    for item in lst:
+        if first:
+            result = item
+            first  = False
+        elif item < result:
+            result = item
+    return result
+
+def py_max(lst):
+    """Python built-in max on a list — never shadowed by PySpark."""
+    result = None
+    first  = True
+    for item in lst:
+        if first:
+            result = item
+            first  = False
+        elif item > result:
+            result = item
+    return result
+
 print("CELL 1 DONE")
 
 
@@ -147,7 +176,6 @@ def logical_name(col):
     return col
 
 def read_pandas(bucket, key):
-    # local imports so this function works even if top-level imports were lost
     import io as _io
     import boto3 as _boto3
     import pyarrow.parquet as _pq
@@ -157,21 +185,39 @@ def read_pandas(bucket, key):
     del buf, body
     return df
 
+def py_min(lst):
+    result = None
+    first  = True
+    for item in lst:
+        if first:
+            result = item
+            first  = False
+        elif item < result:
+            result = item
+    return result
+
+def py_max(lst):
+    result = None
+    first  = True
+    for item in lst:
+        if first:
+            result = item
+            first  = False
+        elif item > result:
+            result = item
+    return result
+
 print("CELL 4 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 5 ── Wide analyser
 # ─────────────────────────────────────────────────────────────────────────────
-import numpy as np
-import pandas as pd
-from collections import defaultdict
 
 def analyse_wide(entries, schema_type):
     import io as _io
     import boto3 as _boto3
     import numpy as _np
-    import pandas as _pd
     import pyarrow.parquet as _pq
     from collections import defaultdict as _dd
 
@@ -227,12 +273,24 @@ def analyse_wide(entries, schema_type):
         vc_items   = list(vc.items())
         vc_items.sort(key=lambda x: -x[1])
         top_val    = str(vc_items[0][0]) if len(vc_items) > 0 else ""
-        str_keys   = []
+
+        # FIX: use py_min/py_max instead of min()/max()
+        # PySpark shadows the built-in min/max with column functions
+        str_keys = []
         for k, _ in vc_items:
             str_keys.append(str(k))
-        min_v    = str(min(str_keys)) if str_keys else ""
-        max_v    = str(max(str_keys)) if str_keys else ""
-        denom    = max(total_rows, 1)
+
+        if len(str_keys) > 0:
+            str_keys_sorted = sorted(str_keys)
+            min_v = str_keys_sorted[0]
+            max_v = str_keys_sorted[-1]
+        else:
+            min_v = ""
+            max_v = ""
+
+        denom    = total_rows
+        if denom < 1:
+            denom = 1
         null_pct = round(n_null / denom * 100, 2)
 
         profile_row = [
@@ -242,7 +300,10 @@ def analyse_wide(entries, schema_type):
         ]
         profile_rows.append(profile_row)
 
-        limit = min(MAX_VALS, len(vc_items))
+        limit = len(vc_items)
+        if limit > MAX_VALS:
+            limit = MAX_VALS
+
         for rank in range(limit):
             val_str = str(vc_items[rank][0])
             cnt_int = int(vc_items[rank][1])
@@ -270,6 +331,7 @@ print("CELL 5 DONE")
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 6 ── Narrow analyser
 # ─────────────────────────────────────────────────────────────────────────────
+
 def analyse_narrow(entries, schema_type):
     import io as _io
     import boto3 as _boto3
@@ -320,9 +382,12 @@ def analyse_narrow(entries, schema_type):
         non_null       = series.dropna()
         distinct_count = int(non_null.nunique())
 
+        # FIX: use sorted() to get min/max — avoids PySpark min()/max() clash
         if len(non_null) > 0:
-            min_v = str(non_null.min())
-            max_v = str(non_null.max())
+            non_null_list   = list(non_null)
+            non_null_sorted = sorted(non_null_list)
+            min_v = str(non_null_sorted[0])
+            max_v = str(non_null_sorted[-1])
         else:
             min_v = ""
             max_v = ""
@@ -332,7 +397,9 @@ def analyse_narrow(entries, schema_type):
             vc_series = vc_series.head(MAX_VALS)
 
         top_val  = str(vc_series.index[0]) if len(vc_series) > 0 else ""
-        denom    = max(total_rows, 1)
+        denom    = total_rows
+        if denom < 1:
+            denom = 1
         null_pct = round(null_count / denom * 100, 2)
 
         print("  col=" + col_name
@@ -545,7 +612,7 @@ except glue_client.exceptions.AlreadyExistsException:
 
 def register_table(tbl_name, path, col_names,
                    int_cols, float_cols, pk=None):
-    import boto3 as _boto3
+    import boto3 as _b3
     cols = []
     for c in col_names:
         if c == pk:
@@ -590,16 +657,15 @@ def register_table(tbl_name, path, col_names,
             "EXTERNAL": "TRUE",
         },
     }
+    gc = _b3.client("glue")
     try:
-        _boto3.client("glue").create_table(
-            DatabaseName=glue_db, TableInput=tbl)
+        gc.create_table(DatabaseName=glue_db, TableInput=tbl)
         print("Created " + glue_db + "." + tbl_name)
-    except _boto3.client("glue").exceptions.AlreadyExistsException:
-        _boto3.client("glue").update_table(
-            DatabaseName=glue_db, TableInput=tbl)
+    except gc.exceptions.AlreadyExistsException:
+        gc.update_table(DatabaseName=glue_db, TableInput=tbl)
         print("Updated " + glue_db + "." + tbl_name)
     try:
-        _boto3.client("athena").start_query_execution(
+        _b3.client("athena").start_query_execution(
             QueryString=(
                 "MSCK REPAIR TABLE "
                 + glue_db + "." + tbl_name),
