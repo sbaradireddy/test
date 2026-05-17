@@ -1,9 +1,24 @@
+TypeError: Invalid argument, not a string or column: 0.0012722015380859375 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
+
+
+
+
+
+
+
+
+
+
 # ==============================================================================
 # PENSKE IOT — Schema Analysis from JSON files
 # Reads JSON files from:
 #   s3://pske-stg-maintenance/projects/ard-iot-data-analysis/
 #      schematypeN/schema_type=schematypeN/part-*.json
-# ==============================================================================
+# ================
+
+
+
+==============================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 1 — Imports and config
