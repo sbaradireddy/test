@@ -1,618 +1,142 @@
-TypeError: Invalid argument, not a string or column: 0.0012722015380859375 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
-
-
-
-
-
-
-
-
-
-
 # ==============================================================================
-# PENSKE IOT — Schema Analysis from JSON files
-# Reads JSON files from:
-#   s3://pske-stg-maintenance/projects/ard-iot-data-analysis/
-#      schematypeN/schema_type=schematypeN/part-*.json
-# ================
-
-
-
-==============================================================
+# SIMPLE: Read JSON from S3 → Write CSV per schema type
+# ==============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 — Imports and config
+# CELL 1 — Config
 # ─────────────────────────────────────────────────────────────────────────────
-import sys
 import boto3
 import pandas as pd
-from datetime import datetime
-from collections import defaultdict
+import io
 
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-
-sc          = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark       = glueContext.spark_session
-job         = Job(glueContext)
-
-# ── Config ────────────────────────────────────────────────────────────────────
-SOURCE_BUCKET  = "pske-stg-maintenance"
-SOURCE_PREFIX  = "projects/ard-iot-data-analysis/"
-# S3 structure:
-#   SOURCE_PREFIX/schematypeN/schema_type=schematypeN/part-*.json
-
-OUTPUT_BUCKET  = "pske-stg-maintenance"
-OUTPUT_PREFIX  = "schema-analysis-output/"
-MAX_VALS       = 200    # max distinct values per column in CSV
-TOP_N          = 50     # top N values per column in QuickSight table
+SOURCE_BUCKET = "pske-stg-maintenance"
+SOURCE_PREFIX = "projects/ard-iot-data-analysis/"
+OUTPUT_BUCKET = "pske-stg-maintenance"
+OUTPUT_PREFIX = "csv-output/"
 
 s3c = boto3.client("s3")
+s3r = boto3.resource("s3")
 print("CELL 1 DONE")
-print("source = s3://" + SOURCE_BUCKET + "/" + SOURCE_PREFIX)
-print("output = s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 — Discover all schema type folders
+# CELL 2 — Find all schema folders and their JSON files
 # ─────────────────────────────────────────────────────────────────────────────
 import boto3
-from collections import defaultdict
 
-# List all top-level folders under SOURCE_PREFIX
-# Each folder = one schema type  e.g. schematype1/, schematype2/ ...
-response  = boto3.client("s3").list_objects_v2(
+# Get top level folders e.g. schematype1/, schematype2/ ...
+resp = boto3.client("s3").list_objects_v2(
     Bucket    = SOURCE_BUCKET,
     Prefix    = SOURCE_PREFIX,
     Delimiter = "/")
 
 schema_folders = []
-for cp in response.get("CommonPrefixes", []):
-    folder = cp["Prefix"]                        # e.g. projects/.../schematype1/
-    name   = folder.rstrip("/").split("/")[-1]   # e.g. schematype1
-    schema_folders.append({
-        "folder_prefix": folder,
-        "schema_name"  : name,
-    })
+for cp in resp.get("CommonPrefixes", []):
+    folder = cp["Prefix"]
+    name   = folder.rstrip("/").split("/")[-1]
+    schema_folders.append({"name": name, "prefix": folder})
 
-print("CELL 2 DONE — schema folders found: " + str(len(schema_folders)))
+print("Found " + str(len(schema_folders)) + " schema folders:")
 for sf in schema_folders:
-    print("  " + sf["schema_name"] + "  ->  " + sf["folder_prefix"])
+    print("  " + sf["name"])
+
+print("CELL 2 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — For each schema folder find the JSON partition subfolder
+# CELL 3 — For each schema: read all JSON files → save as CSV
 # ─────────────────────────────────────────────────────────────────────────────
 import boto3
+import pandas as pd
+import io
+import json
 
-schema_info = []   # list of {schema_name, s3_path, file_count, total_bytes}
+s3c = boto3.client("s3")
+s3r = boto3.resource("s3")
 
 for sf in schema_folders:
-    schema_name   = sf["schema_name"]
-    folder_prefix = sf["folder_prefix"]
+    schema_name = sf["name"]
+    prefix      = sf["prefix"]
 
-    # List subfolders (e.g. schema_type=schematype1/)
-    resp2 = boto3.client("s3").list_objects_v2(
-        Bucket    = SOURCE_BUCKET,
-        Prefix    = folder_prefix,
-        Delimiter = "/")
+    print("\n" + "="*50)
+    print("Processing: " + schema_name)
+    print("="*50)
 
-    sub_prefixes = []
-    for cp2 in resp2.get("CommonPrefixes", []):
-        sub_prefixes.append(cp2["Prefix"])
-
-    # Use first subfolder if exists, else use the folder itself
-    if len(sub_prefixes) > 0:
-        data_prefix = sub_prefixes[0]
-    else:
-        data_prefix = folder_prefix
-
-    # Count JSON files and total bytes
-    file_count  = 0
-    total_bytes = 0
-    paginator   = boto3.client("s3").get_paginator("list_objects_v2")
-    for page in paginator.paginate(
-            Bucket=SOURCE_BUCKET, Prefix=data_prefix):
+    # Find all JSON files under this schema folder (including subfolders)
+    json_keys = []
+    paginator = s3c.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.lower().endswith(".json"):
-                file_count  = file_count  + 1
-                total_bytes = total_bytes + int(obj["Size"])
+                json_keys.append(key)
 
-    s3_path = "s3://" + SOURCE_BUCKET + "/" + data_prefix
+    print("  JSON files found: " + str(len(json_keys)))
 
-    schema_info.append({
-        "schema_name" : schema_name,
-        "s3_path"     : s3_path,
-        "file_count"  : file_count,
-        "total_mb"    : round(total_bytes / 1024 / 1024, 2),
-    })
-
-    print(schema_name
-          + "  path=" + s3_path
-          + "  files=" + str(file_count)
-          + "  mb=" + str(round(total_bytes/1024/1024, 2)))
-
-print("CELL 3 DONE — " + str(len(schema_info)) + " schemas ready")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 4 — Read one schema type into Spark and show schema
-#           (confirms the JSON structure before full analysis)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Read first schema as a test
-if len(schema_info) > 0:
-    test_schema = schema_info[0]
-    print("Testing read: " + test_schema["schema_name"])
-    print("Path: " + test_schema["s3_path"])
-
-    test_df = spark.read.json(test_schema["s3_path"])
-    print("Rows: " + str(test_df.count()))
-    print("Cols: " + str(len(test_df.columns)))
-    print("\nSchema:")
-    test_df.printSchema()
-    print("\nSample (3 rows):")
-    test_df.show(3, truncate=True)
-    del test_df
-
-print("CELL 4 DONE")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 — Core analysis function
-#           Reads JSON, profiles every column, returns pandas DataFrames
-# ─────────────────────────────────────────────────────────────────────────────
-from pyspark.sql import functions as F
-import pandas as pd
-
-def analyse_schema_json(schema_name, s3_path, max_vals, top_n):
-    """
-    Read all JSON files for one schema type.
-    For each column compute:
-      - null count, distinct count, min, max, top value
-      - top N value frequencies
-    Returns three pandas DataFrames: profile_df, values_df, csv_df
-    """
-    print("  Reading: " + s3_path)
-
-    # Read all JSON files in this path
-    df         = spark.read.json(s3_path)
-    total_rows = df.count()
-    col_list   = [str(c) for c in df.columns]
-
-    print("  rows=" + str(total_rows) + "  cols=" + str(len(col_list)))
-
-    profile_rows = []
-    values_rows  = []
-    csv_rows     = []
-
-    for col_name in col_list:
-        # Cast to string so all types are handled uniformly
-        col_df = df.select(
-            F.col("`" + col_name + "`").cast("string").alias("v"))
-
-        # Null count
-        null_count = col_df.filter(
-            F.col("v").isNull() | (F.col("v") == "")
-        ).count()
-
-        # Non-null series
-        non_null_df = col_df.filter(
-            F.col("v").isNotNull() & (F.col("v") != ""))
-
-        # Distinct count
-        distinct_count = non_null_df.distinct().count()
-
-        # Min and max
-        stats = non_null_df.agg(
-            F.min("v").alias("mn"),
-            F.max("v").alias("mx")
-        ).collect()
-
-        min_val = ""
-        max_val = ""
-        if len(stats) > 0 and stats[0]["mn"] is not None:
-            min_val = str(stats[0]["mn"])
-            max_val = str(stats[0]["mx"])
-
-        # Top N value frequencies
-        top_rows = (
-            non_null_df
-            .groupBy("v")
-            .agg(F.count("*").alias("cnt"))
-            .orderBy(F.col("cnt").desc())
-            .limit(max_vals)
-            .collect()
-        )
-
-        top_val  = str(top_rows[0]["v"])   if top_rows else ""
-        denom    = total_rows if total_rows > 0 else 1
-        null_pct = round(null_count / denom * 100, 2)
-
-        print("    col=" + col_name
-              + "  null=" + str(null_count)
-              + "  dist=" + str(distinct_count)
-              + "  top=" + top_val[:25])
-
-        # Profile row
-        profile_rows.append({
-            "schema_type"   : str(schema_name),
-            "column_name"   : str(col_name),
-            "data_type"     : "string",
-            "total_rows"    : int(total_rows),
-            "null_count"    : int(null_count),
-            "null_pct"      : float(null_pct),
-            "distinct_count": int(distinct_count),
-            "min_value"     : str(min_val),
-            "max_value"     : str(max_val),
-            "top_value"     : str(top_val),
-        })
-
-        # Value + CSV rows
-        for rank in range(len(top_rows)):
-            row     = top_rows[rank]
-            val_str = str(row["v"])
-            cnt     = int(row["cnt"])
-            pct     = round(cnt / denom * 100, 2)
-
-            csv_rows.append({
-                "schema_type"   : str(schema_name),
-                "column_name"   : str(col_name),
-                "data_type"     : "string",
-                "value"         : val_str,
-                "value_count"   : cnt,
-                "value_pct"     : float(pct),
-                "total_rows"    : int(total_rows),
-                "null_count"    : int(null_count),
-                "distinct_count": int(distinct_count),
-                "min_value"     : str(min_val),
-                "max_value"     : str(max_val),
-            })
-
-            if rank < top_n:
-                values_rows.append({
-                    "schema_type" : str(schema_name),
-                    "column_name" : str(col_name),
-                    "data_type"   : "string",
-                    "value"       : val_str,
-                    "value_count" : cnt,
-                    "value_pct"   : float(pct),
-                    "value_rank"  : int(rank + 1),
-                    "total_rows"  : int(total_rows),
-                })
-
-    del df
-
-    return (pd.DataFrame(profile_rows),
-            pd.DataFrame(values_rows),
-            pd.DataFrame(csv_rows),
-            int(total_rows))
-
-print("CELL 5 DONE — analyse_schema_json defined")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 — Run analysis on ALL schema types
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-import pandas as pd
-from datetime import datetime
-
-all_profile_dfs  = []
-all_values_dfs   = []
-all_summary_rows = []
-
-s3_main = boto3.client("s3")
-
-for info in schema_info:
-    schema_name = info["schema_name"]
-    s3_path     = info["s3_path"]
-
-    print("\n" + "="*55)
-    print("SCHEMA = " + schema_name)
-    print("PATH   = " + s3_path)
-    print("="*55)
-
-    try:
-        p_df, v_df, c_df, total_rows = analyse_schema_json(
-            schema_name, s3_path, MAX_VALS, TOP_N)
-    except Exception as e:
-        print("ERROR on " + schema_name + ": " + str(e))
+    if len(json_keys) == 0:
+        print("  No JSON files — skipping")
         continue
 
-    if len(p_df) > 0:
-        all_profile_dfs.append(p_df)
-    if len(v_df) > 0:
-        all_values_dfs.append(v_df)
+    # Read each JSON file into pandas
+    all_frames = []
+    for i in range(len(json_keys)):
+        key = json_keys[i]
+        try:
+            body = s3r.Object(SOURCE_BUCKET, key).get()["Body"].read()
 
-    # ── Save CSV immediately ──────────────────────────────────────────────────
-    if len(c_df) > 0:
-        c_sorted = c_df.sort_values(
-            ["column_name", "value_count"],
-            ascending=[True, False])
-        csv_key = (OUTPUT_PREFIX + "csv_analysis/"
-                   + schema_name + "_column_value_mapping.csv")
-        s3_main.put_object(
-            Bucket      = OUTPUT_BUCKET,
-            Key         = csv_key,
-            Body        = c_sorted.to_csv(index=False).encode("utf-8"),
-            ContentType = "text/csv")
-        print("CSV saved  rows=" + str(len(c_sorted))
-              + "  key=" + csv_key)
-        print(c_sorted.head(5).to_string(index=False))
+            # Try reading as JSON lines (one JSON object per line)
+            lines = body.decode("utf-8").strip().split("\n")
+            rows  = []
+            for line in lines:
+                line = line.strip()
+                if len(line) == 0:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
 
-    # ── Summary row ───────────────────────────────────────────────────────────
-    unique_cols = {}
-    for idx in range(len(p_df)):
-        unique_cols[p_df.iloc[idx]["column_name"]] = 1
+            if len(rows) > 0:
+                frame = pd.DataFrame(rows)
+                all_frames.append(frame)
+                print("  [" + str(i+1) + "/" + str(len(json_keys)) + "] "
+                      + key.split("/")[-1]
+                      + "  rows=" + str(len(frame))
+                      + "  cols=" + str(len(frame.columns)))
+            del body, lines, rows
+        except Exception as e:
+            print("  SKIP " + key.split("/")[-1] + ": " + str(e))
 
-    all_summary_rows.append({
-        "schema_type"  : str(schema_name),
-        "total_columns": int(len(unique_cols)),
-        "total_rows"   : int(total_rows),
-        "file_count"   : int(info["file_count"]),
-        "total_mb"     : float(info["total_mb"]),
-        "s3_path"      : str(s3_path),
-        "analysed_at"  : str(datetime.utcnow().isoformat() + "Z"),
-    })
+    if len(all_frames) == 0:
+        print("  No data loaded — skipping")
+        continue
 
-print("\nCELL 6 DONE — " + str(len(schema_info)) + " schemas processed")
+    # Combine all files into one DataFrame
+    combined = pd.concat(all_frames, ignore_index=True, sort=False)
+    print("  Combined: rows=" + str(len(combined))
+          + "  cols=" + str(len(combined.columns)))
+    del all_frames
 
+    # Convert all columns to string
+    combined = combined.astype(str)
+    combined = combined.replace("None", "")
+    combined = combined.replace("nan",  "")
+    combined = combined.replace("NaT",  "")
+    combined = combined.replace("<NA>", "")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 7 — Combine all results into final pandas DataFrames
-# ─────────────────────────────────────────────────────────────────────────────
-import pandas as pd
+    # Save as CSV to S3
+    csv_key = OUTPUT_PREFIX + schema_name + "_all_data.csv"
+    s3c.put_object(
+        Bucket      = OUTPUT_BUCKET,
+        Key         = csv_key,
+        Body        = combined.to_csv(index=False).encode("utf-8"),
+        ContentType = "text/csv")
 
-if len(all_profile_dfs) > 0:
-    final_profile = pd.concat(
-        all_profile_dfs, ignore_index=True, sort=False)
-else:
-    final_profile = pd.DataFrame()
+    print("  SAVED -> s3://" + OUTPUT_BUCKET + "/" + csv_key)
+    print("  Columns: " + str(list(combined.columns)))
+    print("  Preview:")
+    print(combined.head(3).to_string(index=False))
+    del combined
 
-if len(all_values_dfs) > 0:
-    final_values = pd.concat(
-        all_values_dfs, ignore_index=True, sort=False)
-else:
-    final_values = pd.DataFrame()
-
-final_summary = pd.DataFrame(all_summary_rows)
-
-print("CELL 7 DONE")
-print("profile  rows = " + str(len(final_profile)))
-print("values   rows = " + str(len(final_values)))
-print("summary  rows = " + str(len(final_summary)))
-print("\nSummary:")
-print(final_summary.to_string(index=False))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 8 — Write Parquet to S3 using pyarrow (no spark.createDataFrame)
-# ─────────────────────────────────────────────────────────────────────────────
-import io
-import boto3
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-def write_parquet_s3(df, bucket, key, int_cols, float_cols):
-    """Write pandas DataFrame to S3 as Parquet using pyarrow."""
-    if df is None or len(df) == 0:
-        print("  SKIP (empty): " + key)
-        return
-
-    pdf = df.copy()
-
-    # Coerce types explicitly
-    for c in list(pdf.columns):
-        if c in int_cols:
-            pdf[c] = pd.to_numeric(
-                pdf[c], errors="coerce").fillna(0).astype("int64")
-        elif c in float_cols:
-            pdf[c] = pd.to_numeric(
-                pdf[c], errors="coerce").fillna(0.0).astype("float64")
-        else:
-            pdf[c] = pdf[c].fillna("").astype(str)
-
-    # Write to buffer using pyarrow
-    buf   = io.BytesIO()
-    table = pa.Table.from_pandas(pdf, preserve_index=False)
-    pq.write_table(table, buf)
-    buf.seek(0)
-
-    # Upload to S3
-    boto3.client("s3").put_object(
-        Bucket      = bucket,
-        Key         = key,
-        Body        = buf.read(),
-        ContentType = "application/octet-stream")
-    buf.close()
-    print("  Written -> s3://" + bucket + "/" + key)
-
-
-PROFILE_INT   = ["total_rows", "null_count", "distinct_count"]
-PROFILE_FLOAT = ["null_pct"]
-VALUES_INT    = ["value_count", "value_rank", "total_rows"]
-VALUES_FLOAT  = ["value_pct"]
-SUMMARY_INT   = ["total_columns", "total_rows", "file_count"]
-SUMMARY_FLOAT = ["total_mb"]
-
-base = OUTPUT_PREFIX + "quicksight_tables"
-
-print("Writing schema_column_profile...")
-if len(final_profile) > 0:
-    st_list = list(final_profile["schema_type"].unique())
-    for st in st_list:
-        subset = final_profile[
-            final_profile["schema_type"] == st].copy()
-        key = (base + "/schema_column_profile/"
-               + "schema_type=" + st + "/data.parquet")
-        write_parquet_s3(
-            subset, OUTPUT_BUCKET, key, PROFILE_INT, PROFILE_FLOAT)
-
-print("Writing schema_column_values...")
-if len(final_values) > 0:
-    st_list = list(final_values["schema_type"].unique())
-    for st in st_list:
-        subset = final_values[
-            final_values["schema_type"] == st].copy()
-        key = (base + "/schema_column_values/"
-               + "schema_type=" + st + "/data.parquet")
-        write_parquet_s3(
-            subset, OUTPUT_BUCKET, key, VALUES_INT, VALUES_FLOAT)
-
-print("Writing schema_summary...")
-if len(final_summary) > 0:
-    key = base + "/schema_summary/data.parquet"
-    write_parquet_s3(
-        final_summary.copy(),
-        OUTPUT_BUCKET, key, SUMMARY_INT, SUMMARY_FLOAT)
-
-print("CELL 8 DONE — all Parquet files written")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 9 — Register tables in Glue Catalog for Athena + QuickSight
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-
-glue_db     = "penske_iot_reporting"
-glue_client = boto3.client("glue")
-
-try:
-    glue_client.create_database(
-        DatabaseInput={
-            "Name"       : glue_db,
-            "Description": "Penske IoT schema analysis for QuickSight",
-        })
-    print("DB created: " + glue_db)
-except glue_client.exceptions.AlreadyExistsException:
-    print("DB exists:  " + glue_db)
-
-base_s3 = ("s3://" + OUTPUT_BUCKET + "/"
-           + OUTPUT_PREFIX + "quicksight_tables")
-
-
-def register_glue_table(tbl_name, s3_path, col_defs, pk=None):
-    """Register a Parquet table in Glue Catalog."""
-    gc   = boto3.client("glue")
-    cols = []
-    for col_name, col_type in col_defs:
-        if col_name == pk:
-            continue
-        cols.append({"Name": col_name, "Type": col_type})
-
-    part_keys = []
-    if pk is not None:
-        part_keys = [{"Name": pk, "Type": "string"}]
-
-    tbl = {
-        "Name": tbl_name,
-        "StorageDescriptor": {
-            "Columns"  : cols,
-            "Location" : s3_path,
-            "InputFormat": (
-                "org.apache.hadoop.hive.ql.io"
-                ".parquet.MapredParquetInputFormat"),
-            "OutputFormat": (
-                "org.apache.hadoop.hive.ql.io"
-                ".parquet.MapredParquetOutputFormat"),
-            "SerdeInfo": {
-                "SerializationLibrary": (
-                    "org.apache.hadoop.hive.ql.io"
-                    ".parquet.serde.ParquetHiveSerDe"),
-                "Parameters": {"serialization.format": "1"},
-            },
-            "Compressed"            : False,
-            "StoredAsSubDirectories": True,
-        },
-        "PartitionKeys": part_keys,
-        "TableType"    : "EXTERNAL_TABLE",
-        "Parameters"   : {
-            "classification": "parquet",
-            "EXTERNAL"      : "TRUE",
-        },
-    }
-
-    try:
-        gc.create_table(DatabaseName=glue_db, TableInput=tbl)
-        print("  Created  " + glue_db + "." + tbl_name)
-    except gc.exceptions.AlreadyExistsException:
-        gc.update_table(DatabaseName=glue_db, TableInput=tbl)
-        print("  Updated  " + glue_db + "." + tbl_name)
-
-    try:
-        boto3.client("athena").start_query_execution(
-            QueryString         = (
-                "MSCK REPAIR TABLE "
-                + glue_db + "." + tbl_name),
-            ResultConfiguration = {
-                "OutputLocation": (
-                    "s3://" + OUTPUT_BUCKET
-                    + "/athena-query-results/"),
-            })
-        print("  Partitions repaired: " + tbl_name)
-    except Exception as e:
-        print("  Partition repair skipped: " + str(e))
-
-
-# Register all 3 tables
-register_glue_table(
-    "schema_column_profile",
-    base_s3 + "/schema_column_profile/",
-    [("schema_type",    "string"),
-     ("column_name",    "string"),
-     ("data_type",      "string"),
-     ("total_rows",     "bigint"),
-     ("null_count",     "bigint"),
-     ("null_pct",       "double"),
-     ("distinct_count", "bigint"),
-     ("min_value",      "string"),
-     ("max_value",      "string"),
-     ("top_value",      "string")],
-    pk="schema_type")
-
-register_glue_table(
-    "schema_column_values",
-    base_s3 + "/schema_column_values/",
-    [("schema_type",  "string"),
-     ("column_name",  "string"),
-     ("data_type",    "string"),
-     ("value",        "string"),
-     ("value_count",  "bigint"),
-     ("value_pct",    "double"),
-     ("value_rank",   "bigint"),
-     ("total_rows",   "bigint")],
-    pk="schema_type")
-
-register_glue_table(
-    "schema_summary",
-    base_s3 + "/schema_summary/",
-    [("schema_type",   "string"),
-     ("total_columns", "bigint"),
-     ("total_rows",    "bigint"),
-     ("file_count",    "bigint"),
-     ("total_mb",      "double"),
-     ("s3_path",       "string"),
-     ("analysed_at",   "string")])
-
-job.commit()
-
-print("\nCELL 9 DONE — job committed")
-print("\nOutputs:")
-print("  CSV per schema  ->  s3://" + OUTPUT_BUCKET
-      + "/" + OUTPUT_PREFIX + "csv_analysis/")
-print("  Parquet tables  ->  s3://" + OUTPUT_BUCKET
-      + "/" + OUTPUT_PREFIX + "quicksight_tables/")
-print("  Glue database   ->  " + glue_db)
-print("\nAthena sample queries:")
-print("  SELECT * FROM " + glue_db + ".schema_summary;")
-print("  SELECT * FROM " + glue_db
-      + ".schema_column_profile WHERE schema_type='schematype1';")
-print("  SELECT column_name, value, value_count, value_pct")
-print("    FROM " + glue_db + ".schema_column_values")
-print("    WHERE schema_type='schematype1'")
-print("    ORDER BY column_name, value_rank;")
+print("\nDONE — all schemas processed")
+print("CSVs at: s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
