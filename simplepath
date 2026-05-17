@@ -1,249 +1,97 @@
-TypeError: Invalid argument, not a string or column: 0.0012722015380859375 of type <class 'float'>. For column literals, use 'lit', 'array', 'struct' or 'create_map' function.
-
-
-
-# ==============================================================================
-# GLUE NOTEBOOK
-# Goal: Read JSON files → produce one CSV per schema type showing
-#       column | data_type | value | value_count
-# No Spark createDataFrame — pure boto3 + pandas + json
-# ==============================================================================
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 — Config  (only edit this cell)
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-import pandas as pd
-import json
-import io
+%%python
+import boto3, pandas as pd, json, io
+from collections import defaultdict
 
 SOURCE_BUCKET = "pske-stg-maintenance"
 SOURCE_PREFIX = "projects/ard-iot-data-analysis/"
-# Your S3 layout (from screenshot):
-#   projects/ard-iot-data-analysis/
-#     schematype1/
-#       schema_type=schematype1/
-#         part-00000-4f03e8b1-....json   (884 KB)
-#         part-00001-....json
-#         ...17 files
-
 OUTPUT_BUCKET = "pske-stg-maintenance"
 OUTPUT_PREFIX = "csv-output/"
 
 s3c = boto3.client("s3")
 s3r = boto3.resource("s3")
 
-print("CELL 1 DONE")
-print("source = s3://" + SOURCE_BUCKET + "/" + SOURCE_PREFIX)
-print("output = s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 — Find all JSON files grouped by schema type
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-from collections import defaultdict
-
-s3c = boto3.client("s3")
-
-# Walk entire prefix and collect every .json file
-# Group by the top-level folder name = schema type
-# e.g. projects/ard-iot-data-analysis/schematype1/... → schema = "schematype1"
-
+# Find all JSON files grouped by schema type
 json_by_schema = defaultdict(list)
-
 paginator = s3c.get_paginator("list_objects_v2")
 for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
     for obj in page.get("Contents", []):
         key  = obj["Key"]
         size = obj["Size"]
-        if not key.lower().endswith(".json"):
+        if not key.lower().endswith(".json") or size == 0:
             continue
-        if size == 0:
-            continue
-
-        # Extract schema name from path
-        # key = projects/ard-iot-data-analysis/schematype1/schema_type=schematype1/part-00000.json
-        relative = key[len(SOURCE_PREFIX):]          # schematype1/schema_type=.../part-00000.json
-        schema   = relative.split("/")[0]             # schematype1
-
-        json_by_schema[schema].append({
-            "key"  : key,
-            "size" : size,
-        })
+        relative = key[len(SOURCE_PREFIX):]
+        schema   = relative.split("/")[0]
+        json_by_schema[schema].append({"key": key, "size": size})
 
 schema_list = sorted(json_by_schema.keys())
+print("Schemas found: " + str(schema_list))
 
-print("CELL 2 DONE")
-print("Schema types found: " + str(len(schema_list)))
-for s in schema_list:
-    files     = json_by_schema[s]
-    total_mb  = 0
-    for f in files:
-        total_mb = total_mb + f["size"]
-    total_mb = round(total_mb / 1024 / 1024, 2)
-    print("  " + s + "  files=" + str(len(files)) + "  mb=" + str(total_mb))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 3 — For each schema type:
-#           1. Read all JSON files into pandas
-#           2. Build column mapping: column | data_type | value | value_count
-#           3. Save CSV to S3
-# ─────────────────────────────────────────────────────────────────────────────
-import boto3
-import pandas as pd
-import json
-import io
-
-s3c = boto3.client("s3")
-s3r = boto3.resource("s3")
-
-MAX_VALUES_PER_COL = 200   # max distinct values to show per column
-
+# Process each schema
 for schema in schema_list:
-    files = json_by_schema[schema]
-
-    print("\n" + "="*55)
-    print("SCHEMA: " + schema + "  (" + str(len(files)) + " files)")
-    print("="*55)
-
-    # ── Step 1: read all JSON files ───────────────────────────────────────────
+    files    = json_by_schema[schema]
     all_rows = []
 
-    for i in range(len(files)):
-        f   = files[i]
-        key = f["key"]
+    for f in files:
         try:
-            body  = s3r.Object(SOURCE_BUCKET, key).get()["Body"].read()
-            text  = body.decode("utf-8").strip()
-            lines = text.split("\n")
-
-            file_rows = []
-            for line in lines:
+            body      = s3r.Object(SOURCE_BUCKET, f["key"]).get()["Body"].read()
+            for line in body.decode("utf-8").strip().split("\n"):
                 line = line.strip()
-                if len(line) == 0:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    file_rows.append(obj)
-                except Exception:
-                    pass
-
-            all_rows = all_rows + file_rows
-            print("  [" + str(i+1) + "/" + str(len(files)) + "] "
-                  + key.split("/")[-1]
-                  + "  rows=" + str(len(file_rows)))
-            del body, text, lines, file_rows
+                if line:
+                    try:
+                        all_rows.append(json.loads(line))
+                    except:
+                        pass
+            del body
         except Exception as e:
-            print("  SKIP " + key.split("/")[-1] + " : " + str(e))
+            print("SKIP " + f["key"] + ": " + str(e))
 
-    if len(all_rows) == 0:
-        print("  No data — skipping " + schema)
+    if not all_rows:
+        print("No data for " + schema)
         continue
 
-    # ── Step 2: build DataFrame ───────────────────────────────────────────────
     df         = pd.DataFrame(all_rows)
     total_rows = len(df)
-    col_list   = list(df.columns)
-
-    print("  Total rows=" + str(total_rows)
-          + "  Total cols=" + str(len(col_list)))
-    print("  Columns: " + str(col_list))
-
-    # ── Step 3: build column mapping ──────────────────────────────────────────
-    # Output format:
-    #   schema_type | column_name | data_type | value | value_count | value_pct
-    #   schematype1 | vehicleId   | string    | VH001 | 1450        | 23.5
+    print(schema + " rows=" + str(total_rows) + " cols=" + str(list(df.columns)))
 
     mapping_rows = []
-
-    for col in col_list:
-        series = df[col]
-
-        # Detect data type from pandas dtype
-        dtype_str = str(series.dtype)
-        if "int" in dtype_str:
-            data_type = "integer"
-        elif "float" in dtype_str:
-            data_type = "float"
-        elif "bool" in dtype_str:
-            data_type = "boolean"
-        elif "datetime" in dtype_str:
-            data_type = "timestamp"
-        else:
-            data_type = "string"
-
-        # Convert to string for value counting
-        series_str = series.astype(str)
-
-        # Replace null-like values
-        null_vals  = ["None", "nan", "NaT", "<NA>", "null", "none", ""]
-        null_mask  = series_str.isin(null_vals)
+    for col in list(df.columns):
+        series     = df[col].astype(str)
+        null_vals  = {"None","nan","NaT","<NA>","null","none",""}
+        null_mask  = series.isin(null_vals)
         null_count = int(null_mask.sum())
-        non_null   = series_str[~null_mask]
+        non_null   = series[~null_mask]
+        vc         = non_null.value_counts().head(200)
+        denom      = total_rows if total_rows > 0 else 1
 
-        # Value counts
-        vc = non_null.value_counts()
-        if len(vc) > MAX_VALUES_PER_COL:
-            vc = vc.head(MAX_VALUES_PER_COL)
+        dtype_str = str(df[col].dtype)
+        if   "int"      in dtype_str: data_type = "integer"
+        elif "float"    in dtype_str: data_type = "float"
+        elif "bool"     in dtype_str: data_type = "boolean"
+        elif "datetime" in dtype_str: data_type = "timestamp"
+        else:                         data_type = "string"
 
-        denom = total_rows if total_rows > 0 else 1
+        for rank, (val, cnt) in enumerate(zip(list(vc.index), list(vc.values))):
+            mapping_rows.append({
+                "schema_type"   : schema,
+                "column_name"   : col,
+                "data_type"     : data_type,
+                "value"         : str(val),
+                "value_count"   : int(cnt),
+                "value_pct"     : round(int(cnt)/denom*100, 2),
+                "total_rows"    : int(total_rows),
+                "null_count"    : int(null_count),
+                "distinct_count": int(len(vc)),
+            })
 
-        # One row per distinct value
-        vc_index  = list(vc.index)
-        vc_values = list(vc.values)
+    out_df  = pd.DataFrame(mapping_rows)
+    out_df  = out_df.sort_values(["column_name","value_count"], ascending=[True,False])
+    csv_key = OUTPUT_PREFIX + schema + "_column_value_mapping.csv"
+    s3c.put_object(
+        Bucket=OUTPUT_BUCKET, Key=csv_key,
+        Body=out_df.to_csv(index=False).encode("utf-8"),
+        ContentType="text/csv")
+    print("SAVED -> s3://" + OUTPUT_BUCKET + "/" + csv_key + " rows=" + str(len(out_df)))
+    print(out_df.head(5).to_string(index=False))
+    del df, all_rows, mapping_rows, out_df
 
-        for rank in range(len(vc_index)):
-            val       = str(vc_index[rank])
-            cnt       = int(vc_values[rank])
-            pct       = round(cnt / denom * 100, 2)
-
-            row = dict()
-            row["schema_type"]   = str(schema)
-            row["column_name"]   = str(col)
-            row["data_type"]     = str(data_type)
-            row["value"]         = val
-            row["value_count"]   = cnt
-            row["value_pct"]     = pct
-            row["total_rows"]    = int(total_rows)
-            row["null_count"]    = int(null_count)
-            row["distinct_count"]= int(len(vc))
-            mapping_rows.append(row)
-
-        print("  col=" + str(col)
-              + "  type=" + data_type
-              + "  distinct=" + str(len(vc))
-              + "  nulls=" + str(null_count)
-              + "  top=" + str(vc_index[0])[:20] if len(vc_index) > 0 else "")
-
-    # ── Step 4: save CSV to S3 ────────────────────────────────────────────────
-    if len(mapping_rows) > 0:
-        out_df = pd.DataFrame(mapping_rows)
-        out_df = out_df.sort_values(
-            ["column_name", "value_count"],
-            ascending=[True, False])
-
-        csv_key = OUTPUT_PREFIX + schema + "_column_value_mapping.csv"
-
-        s3c.put_object(
-            Bucket      = OUTPUT_BUCKET,
-            Key         = csv_key,
-            Body        = out_df.to_csv(index=False).encode("utf-8"),
-            ContentType = "text/csv")
-
-        print("\n  SAVED -> s3://" + OUTPUT_BUCKET + "/" + csv_key)
-        print("  CSV rows = " + str(len(out_df)))
-        print("\n  PREVIEW (first 10 rows):")
-        print(out_df.head(10).to_string(index=False))
-
-    del df, all_rows, mapping_rows
-
-print("\n" + "="*55)
-print("ALL DONE")
-print("="*55)
-print("Output CSVs:")
-for schema in schema_list:
-    print("  s3://" + OUTPUT_BUCKET + "/"
-          + OUTPUT_PREFIX + schema + "_column_value_mapping.csv")
+print("ALL DONE - check s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX)
