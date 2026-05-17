@@ -1,3 +1,8 @@
+CommandFailedException: Script file doesn't exist s3://aws-glue-assets-976432587531-us-east-1/scripts/job-maintenance-nb-Shashider.py
+
+
+
+
 """
 PENSKE IOT — Schema Analysis
 Run as: AWS Glue Python Shell Job (NOT a PySpark notebook)
