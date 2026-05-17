@@ -1,50 +1,75 @@
-The test cell works perfectly — pandas ok, S3 write ok, Spark read ok, cast ok. That means the `make_spark_df` function itself is fine.
+# SELF-CONTAINED diagnostic — finds the float in col_names
+PROFILE_COLS = ["schema_type","column_name","original_name","data_type",
+                "total_rows","null_count","null_pct","distinct_count",
+                "min_value","max_value","top_value"]
+VALUES_COLS  = ["schema_type","column_name","original_name","data_type",
+                "value","value_count","value_pct","value_rank","total_rows"]
+SUMMARY_COLS = ["schema_type","total_columns","total_rows","file_count",
+                "date_count","date_min","date_max","date_list",
+                "analysed_at","is_wide"]
 
-The error is coming from somewhere **before** Cell 8 — specifically the `F.col()` cast calls inside `make_spark_df` are fine, but something in Cells 5, 6, or 7 is still calling a Spark function with a float.
+PROFILE_INT   = ["total_rows", "null_count", "distinct_count"]
+PROFILE_FLOAT = ["null_pct"]
+VALUES_INT    = ["value_count", "value_rank", "total_rows"]
+VALUES_FLOAT  = ["value_pct"]
+SUMMARY_INT   = ["total_columns", "total_rows", "file_count", "date_count"]
 
-The culprit is this line in `analyse_narrow` Cell 6:
+# Check all_profile, all_values, all_summary for float values in wrong positions
+print("Checking all_profile rows...")
+for i in range(len(all_profile)):
+    row = all_profile[i]
+    if len(row) != len(PROFILE_COLS):
+        print("ROW " + str(i) + " wrong length: " + str(len(row)) + " expected " + str(len(PROFILE_COLS)))
+        print("  row=" + str(row))
+        break
+    for j in range(len(row)):
+        col_name = PROFILE_COLS[j]
+        val      = row[j]
+        if col_name in PROFILE_INT:
+            if not isinstance(val, int):
+                print("PROFILE row=" + str(i) + " col=" + col_name + " expected int got " + type(val).__name__ + " val=" + str(val))
+        elif col_name in PROFILE_FLOAT:
+            if not isinstance(val, float):
+                print("PROFILE row=" + str(i) + " col=" + col_name + " expected float got " + type(val).__name__ + " val=" + str(val))
+        else:
+            if not isinstance(val, str):
+                print("PROFILE row=" + str(i) + " col=" + col_name + " expected str got " + type(val).__name__ + " val=" + str(val))
 
-```python
-from pyspark.sql import functions as _F
-cast_list.append(_F.col(c).cast("bigint").alias(c))
-```
+print("Checking all_values rows...")
+for i in range(len(all_values)):
+    row = all_values[i]
+    if len(row) != len(VALUES_COLS):
+        print("ROW " + str(i) + " wrong length: " + str(len(row)) + " expected " + str(len(VALUES_COLS)))
+        print("  row=" + str(row))
+        break
+    for j in range(len(row)):
+        col_name = VALUES_COLS[j]
+        val      = row[j]
+        if col_name in VALUES_INT:
+            if not isinstance(val, int):
+                print("VALUES row=" + str(i) + " col=" + col_name + " expected int got " + type(val).__name__ + " val=" + str(val))
+        elif col_name in VALUES_FLOAT:
+            if not isinstance(val, float):
+                print("VALUES row=" + str(i) + " col=" + col_name + " expected float got " + type(val).__name__ + " val=" + str(val))
+        else:
+            if not isinstance(val, str):
+                print("VALUES row=" + str(i) + " col=" + col_name + " expected str got " + type(val).__name__ + " val=" + str(val))
 
-Wait — Cell 6 has no Spark. Let me look at what's actually different. The test works but the real code fails. The difference is **`value_pct`** — in your real data `46.607421875` is a float being passed somewhere as a column name. This means one of your **column names in the actual parquet file** is a float number like `46.607421875`.
+print("Checking all_summary rows...")
+for i in range(len(all_summary)):
+    row = all_summary[i]
+    if len(row) != len(SUMMARY_COLS):
+        print("ROW " + str(i) + " wrong length: " + str(len(row)) + " expected " + str(len(SUMMARY_COLS)))
+        print("  row=" + str(row))
+        break
+    for j in range(len(row)):
+        col_name = SUMMARY_COLS[j]
+        val      = row[j]
+        if col_name in SUMMARY_INT:
+            if not isinstance(val, int):
+                print("SUMMARY row=" + str(i) + " col=" + col_name + " expected int got " + type(val).__name__ + " val=" + str(val))
+        else:
+            if not isinstance(val, str):
+                print("SUMMARY row=" + str(i) + " col=" + col_name + " expected str got " + type(val).__name__ + " val=" + str(val))
 
-Run this one cell to confirm:
-
-```python
-# Run this to find the exact bad column name
-import io
-import boto3
-import pyarrow.parquet as pq
-
-for st in schema_types:
-    entries = by_schema[st]
-    entry   = entries[0]
-    body    = boto3.resource("s3").Object(
-        SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
-    buf     = io.BytesIO(body)
-    tbl     = pq.read_table(buf)
-    for i in range(len(tbl.schema)):
-        field     = tbl.schema.field(i)
-        name      = field.name
-        name_type = type(name).__name__
-        if name_type != "str":
-            print("FOUND IT: schema=" + st
-                  + "  col_index=" + str(i)
-                  + "  name=" + str(name)
-                  + "  type=" + name_type)
-    # Also check if any column name looks like a float
-    for i in range(len(tbl.schema)):
-        name = tbl.schema.field(i).name
-        try:
-            float(str(name))
-            print("FLOAT NAME: schema=" + st
-                  + "  col=" + str(name))
-        except ValueError:
-            pass
-    del tbl, buf, body
-
-print("scan complete")
-```
+print("DONE — any lines above show the bad value and which row/col it is in")
