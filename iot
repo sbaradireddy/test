@@ -1,3 +1,8 @@
+
+PySparkTypeError: [NOT_COLUMN_OR_STR] Argument `col` should be a Column or str, got float.
+
+
+
 # ==============================================================================
 # AWS GLUE NOTEBOOK
 # Penske IoT — Schema-wise Column Analysis + QuickSight Reporting Tables
