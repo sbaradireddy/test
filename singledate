@@ -1,3 +1,73 @@
+Please run this single cell first and tell me the **exact line number** from the traceback:
+
+```python
+# PASTE THIS AS A SINGLE CELL AND RUN IT
+import traceback
+import boto3
+import pandas as pd
+
+test_rows = [
+    ["SchemaType1", "col1", "col1", "string", "val1", 5, 50.0, 1, 100],
+    ["SchemaType1", "col2", "col2", "string", "val2", 3, 30.0, 2, 100],
+]
+test_cols   = ["schema_type","column_name","original_name","data_type",
+               "value","value_count","value_pct","value_rank","total_rows"]
+test_int    = ["value_count","value_rank","total_rows"]
+test_float  = ["value_pct"]
+
+try:
+    pdf = pd.DataFrame(test_rows, columns=test_cols)
+    for c in test_cols:
+        if c in test_int:
+            pdf[c] = pd.to_numeric(pdf[c], errors="coerce").fillna(0).astype("int64")
+        elif c in test_float:
+            pdf[c] = pd.to_numeric(pdf[c], errors="coerce").fillna(0.0).astype("float64")
+        else:
+            pdf[c] = pdf[c].fillna("").astype(str)
+    print("pandas ok")
+    print(pdf.dtypes)
+
+    # Try S3 write
+    csv_bytes = pdf.to_csv(index=False).encode("utf-8")
+    boto3.client("s3").put_object(
+        Bucket="pske-stg-maintenance",
+        Key="reporting-output/tmp_test/test.csv",
+        Body=csv_bytes, ContentType="text/csv")
+    print("s3 write ok")
+
+    # Try Spark read
+    sdf = spark.read.option("header","true").csv(
+        "s3://pske-stg-maintenance/reporting-output/tmp_test/test.csv")
+    print("spark read ok")
+    sdf.show()
+
+    # Try cast
+    from pyspark.sql import functions as F
+    sdf2 = sdf.select(
+        F.col("schema_type").cast("string"),
+        F.col("value_count").cast("bigint"),
+        F.col("value_pct").cast("double"),
+    )
+    sdf2.show()
+    print("cast ok")
+
+except Exception as e:
+    traceback.print_exc()
+    print("FAILED AT:", str(e))
+```
+
+This will tell us **exactly** which step fails — pandas coercion, S3 write, Spark read, or the cast. Share the output and I'll give you the precise one-line fix.
+
+
+
+
+
+
+
+
+
+
+
 # ==============================================================================
 # PENSKE IOT — Schema Analysis
 # Fix: max() and min() shadowed by PySpark — use sorted() instead
