@@ -1,18 +1,21 @@
 # ==============================================================================
-# PENSKE IOT — Schema Analysis  (Generator-free version)
+# PENSKE IOT — Schema Analysis
+# All imports are repeated inside each function so no "name not defined" errors
+# regardless of which cells were run or in what order.
 # ==============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 1 ── Imports
+# CELL 1 ── Spark init + top-level imports
 # ─────────────────────────────────────────────────────────────────────────────
-import io, re, json
-from datetime import datetime
-from collections import defaultdict
-
+import io
+import re
+import json
 import boto3
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+from datetime import datetime
+from collections import defaultdict
 
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
@@ -39,11 +42,15 @@ print("CELL 1 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 2 ── List files  (NO generator expressions anywhere)
+# CELL 2 ── List files
 # ─────────────────────────────────────────────────────────────────────────────
+import re
+import boto3
+from collections import defaultdict
+
 files_on_date = []
 
-all_pages = s3c.get_paginator("list_objects_v2").paginate(
+all_pages = boto3.client("s3").get_paginator("list_objects_v2").paginate(
     Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX)
 
 for page in all_pages:
@@ -52,20 +59,18 @@ for page in all_pages:
         key = obj["Key"]
         if not key.lower().endswith(".parquet"):
             continue
-        relative = key[len(SOURCE_PREFIX):]
-        relative = relative.strip("/")
-        parts    = relative.split("/")
+        relative    = key[len(SOURCE_PREFIX):].strip("/")
+        parts       = relative.split("/")
         if len(parts) < 3:
             continue
         date_folder = parts[0]
         if date_folder < DATE_FROM or date_folder > DATE_TO:
             continue
-        filename   = parts[-1]
-        stem       = filename.rsplit(".parquet", 1)[0]
-        m          = re.match(r"^(SchemaType\d+)", stem, re.IGNORECASE)
+        filename    = parts[-1]
+        stem        = filename.rsplit(".parquet", 1)[0]
+        m           = re.match(r"^(SchemaType\d+)", stem, re.IGNORECASE)
         schema_type = m.group(1) if m else stem
 
-        # Build dict with NO generator expressions
         file_entry = dict()
         file_entry["s3_key"]      = key
         file_entry["s3_uri"]      = "s3://" + SOURCE_BUCKET + "/" + key
@@ -74,58 +79,64 @@ for page in all_pages:
         file_entry["size_bytes"]  = int(obj["Size"])
         files_on_date.append(file_entry)
 
-# Build by_schema with NO generator expressions
-by_schema = defaultdict(list)
+by_schema    = defaultdict(list)
 for f in files_on_date:
-    st = f["schema_type"]
-    by_schema[st].append(f)
-
+    by_schema[f["schema_type"]].append(f)
 schema_types = sorted(by_schema.keys())
 
-print("CELL 2 DONE — files={} schemas={}".format(
-    len(files_on_date), len(schema_types)))
-
+print("CELL 2 DONE  files=" + str(len(files_on_date))
+      + "  schemas=" + str(len(schema_types)))
 for st in schema_types:
-    file_list  = by_schema[st]
-    file_count = len(file_list)
-    total_kb   = 0
+    file_list = by_schema[st]
+    total_kb  = 0
     for f in file_list:
-        total_kb = total_kb + f["size_bytes"]   # NO generator, plain loop
+        total_kb = total_kb + f["size_bytes"]
     total_kb = total_kb / 1024
-    print("   schema={} files={} kb={:.1f}".format(st, file_count, total_kb))
+    print("  " + st + "  files=" + str(len(file_list))
+          + "  kb=" + str(round(total_kb, 1)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 3 ── Peek column counts
 # ─────────────────────────────────────────────────────────────────────────────
+import io
+import boto3
+import pyarrow.parquet as pq
+
 schema_col_counts = dict()
 
 for st in schema_types:
     file_list = by_schema[st]
     entry     = file_list[0]
     try:
-        body = s3_res.Object(SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
-        buf  = io.BytesIO(body)
-        tbl  = pq.read_table(buf)
+        body  = boto3.resource("s3").Object(
+            SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
+        buf   = io.BytesIO(body)
+        tbl   = pq.read_table(buf)
         ncols = int(len(tbl.schema))
         nrows = int(tbl.num_rows)
         schema_col_counts[st] = ncols
-        print("schema={} rows={} cols={}  OK".format(st, nrows, ncols))
         del tbl, buf, body
+        print(st + "  rows=" + str(nrows) + "  cols=" + str(ncols) + "  OK")
     except Exception as e:
         schema_col_counts[st] = 0
-        print("schema={}  ERROR: {}".format(st, e))
+        print(st + "  ERROR: " + str(e))
 
 wide_list = []
 for st in schema_types:
     if schema_col_counts[st] > WIDE_COLS:
         wide_list.append(st)
-print("CELL 3 DONE — wide schemas: {}".format(wide_list))
+print("CELL 3 DONE  wide=" + str(wide_list))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 4 ── Helpers  (NO generator expressions)
+# CELL 4 ── Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+import io
+import re
+import boto3
+import pyarrow.parquet as pq
+
 _ARR = re.compile(r"^(.+?)_\d+_(.+)$")
 
 def logical_name(col):
@@ -136,9 +147,13 @@ def logical_name(col):
     return col
 
 def read_pandas(bucket, key):
-    body = boto3.resource("s3").Object(bucket, key).get()["Body"].read()
-    buf  = io.BytesIO(body)
-    df   = pq.read_table(buf).to_pandas()
+    # local imports so this function works even if top-level imports were lost
+    import io as _io
+    import boto3 as _boto3
+    import pyarrow.parquet as _pq
+    body = _boto3.resource("s3").Object(bucket, key).get()["Body"].read()
+    buf  = _io.BytesIO(body)
+    df   = _pq.read_table(buf).to_pandas()
     del buf, body
     return df
 
@@ -146,33 +161,50 @@ print("CELL 4 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 5 ── WIDE analyser — pure pandas, NO generator expressions
+# CELL 5 ── Wide analyser
 # ─────────────────────────────────────────────────────────────────────────────
+import numpy as np
+import pandas as pd
+from collections import defaultdict
+
 def analyse_wide(entries, schema_type):
-    freq       = defaultdict(lambda: defaultdict(int))
-    null_cnt   = defaultdict(int)
+    import io as _io
+    import boto3 as _boto3
+    import numpy as _np
+    import pandas as _pd
+    import pyarrow.parquet as _pq
+    from collections import defaultdict as _dd
+
+    freq       = _dd(lambda: _dd(int))
+    null_cnt   = _dd(int)
     total_rows = 0
 
     entry_count = len(entries)
     for i in range(entry_count):
         entry = entries[i]
         try:
-            df    = read_pandas(SOURCE_BUCKET, entry["s3_key"])
-            n     = int(len(df))
+            body  = _boto3.resource("s3").Object(
+                SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
+            buf   = _io.BytesIO(body)
+            df    = _pq.read_table(buf).to_pandas()
+            del buf, body
+            n          = int(len(df))
             total_rows = total_rows + n
-            col_list = list(df.columns)
-            print("  [{}/{}] {} rows={} cols={}".format(
-                i + 1, entry_count, entry["filename"], n, len(col_list)))
+            col_list   = list(df.columns)
+            print("  [" + str(i+1) + "/" + str(entry_count) + "] "
+                  + entry["filename"]
+                  + "  rows=" + str(n)
+                  + "  cols=" + str(len(col_list)))
 
             for col in col_list:
                 lc         = logical_name(col)
-                col_values = list(df[col])           # plain list, no generator
+                col_values = list(df[col])
                 for val in col_values:
                     is_null = False
                     if val is None:
                         is_null = True
                     elif isinstance(val, float):
-                        if np.isnan(val):
+                        if _np.isnan(val):
                             is_null = True
                     if is_null:
                         null_cnt[lc] = null_cnt[lc] + 1
@@ -181,7 +213,7 @@ def analyse_wide(entries, schema_type):
                         freq[lc][val_str] = freq[lc][val_str] + 1
             del df, col_values
         except Exception as e:
-            print("  SKIP {} : {}".format(entry["filename"], e))
+            print("  SKIP " + entry["filename"] + ": " + str(e))
 
     profile_rows = []
     values_rows  = []
@@ -192,23 +224,14 @@ def analyse_wide(entries, schema_type):
         vc         = freq[lc]
         n_null     = int(null_cnt.get(lc, 0))
         n_distinct = int(len(vc))
-
-        # Sort by count descending — NO generator
         vc_items   = list(vc.items())
         vc_items.sort(key=lambda x: -x[1])
-
-        if len(vc_items) > 0:
-            top_val = str(vc_items[0][0])
-        else:
-            top_val = ""
-
-        str_keys = []
+        top_val    = str(vc_items[0][0]) if len(vc_items) > 0 else ""
+        str_keys   = []
         for k, _ in vc_items:
             str_keys.append(str(k))
-
-        min_v = str(min(str_keys)) if str_keys else ""
-        max_v = str(max(str_keys)) if str_keys else ""
-
+        min_v    = str(min(str_keys)) if str_keys else ""
+        max_v    = str(max(str_keys)) if str_keys else ""
         denom    = max(total_rows, 1)
         null_pct = round(n_null / denom * 100, 2)
 
@@ -221,11 +244,9 @@ def analyse_wide(entries, schema_type):
 
         limit = min(MAX_VALS, len(vc_items))
         for rank in range(limit):
-            val, cnt = vc_items[rank]
-            val_str  = str(val)
-            cnt_int  = int(cnt)
-            pct      = round(cnt_int / denom * 100, 2)
-
+            val_str = str(vc_items[rank][0])
+            cnt_int = int(vc_items[rank][1])
+            pct     = round(cnt_int / denom * 100, 2)
             csv_row = [
                 str(schema_type), str(lc), str(lc), "string",
                 val_str, cnt_int, float(pct),
@@ -233,7 +254,6 @@ def analyse_wide(entries, schema_type):
                 str(min_v), str(max_v),
             ]
             csv_rows.append(csv_row)
-
             if rank < TOP_N:
                 val_row = [
                     str(schema_type), str(lc), str(lc), "string",
@@ -248,44 +268,53 @@ print("CELL 5 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 ── NARROW analyser — pandas, NO generator expressions
+# CELL 6 ── Narrow analyser
 # ─────────────────────────────────────────────────────────────────────────────
 def analyse_narrow(entries, schema_type):
+    import io as _io
+    import boto3 as _boto3
+    import pandas as _pd
+    import pyarrow.parquet as _pq
+
     frames      = []
     entry_count = len(entries)
-
     for i in range(entry_count):
         entry = entries[i]
         try:
-            df = read_pandas(SOURCE_BUCKET, entry["s3_key"])
-            print("  [{}/{}] {} rows={} cols={}".format(
-                i + 1, entry_count, entry["filename"],
-                len(df), len(df.columns)))
+            body = _boto3.resource("s3").Object(
+                SOURCE_BUCKET, entry["s3_key"]).get()["Body"].read()
+            buf  = _io.BytesIO(body)
+            df   = _pq.read_table(buf).to_pandas()
+            del buf, body
+            print("  [" + str(i+1) + "/" + str(entry_count) + "] "
+                  + entry["filename"]
+                  + "  rows=" + str(len(df))
+                  + "  cols=" + str(len(df.columns)))
             frames.append(df)
         except Exception as e:
-            print("  SKIP {}: {}".format(entry["filename"], e))
+            print("  SKIP " + entry["filename"] + ": " + str(e))
 
     if len(frames) == 0:
         return [], [], [], 0
 
-    combined   = pd.concat(frames, ignore_index=True, sort=False)
+    combined   = _pd.concat(frames, ignore_index=True, sort=False)
     total_rows = int(len(combined))
     col_list   = list(combined.columns)
-    print("  Combined rows={} cols={}".format(total_rows, len(col_list)))
+    print("  Combined rows=" + str(total_rows)
+          + "  cols=" + str(len(col_list)))
     del frames
 
     profile_rows = []
     values_rows  = []
     csv_rows     = []
 
+    null_strings = ["None", "nan", "<NA>", "NaT", "none", "null", ""]
+
     for col in col_list:
         col_name = str(col)
         series   = combined[col_name].astype(str)
-
-        # Replace null-like strings without using generator
-        null_strings = ["None", "nan", "<NA>", "NaT", "none", "null", ""]
         for ns in null_strings:
-            series = series.replace(ns, pd.NA)
+            series = series.replace(ns, _pd.NA)
 
         null_count     = int(series.isna().sum())
         non_null       = series.dropna()
@@ -302,13 +331,14 @@ def analyse_narrow(entries, schema_type):
         if len(vc_series) > MAX_VALS:
             vc_series = vc_series.head(MAX_VALS)
 
-        top_val = str(vc_series.index[0]) if len(vc_series) > 0 else ""
-
+        top_val  = str(vc_series.index[0]) if len(vc_series) > 0 else ""
         denom    = max(total_rows, 1)
         null_pct = round(null_count / denom * 100, 2)
 
-        print("  col={} null={} dist={} top={}".format(
-            col_name, null_count, distinct_count, top_val[:20]))
+        print("  col=" + col_name
+              + "  null=" + str(null_count)
+              + "  dist=" + str(distinct_count)
+              + "  top=" + top_val[:20])
 
         profile_row = [
             str(schema_type), col_name, col_name, "string",
@@ -319,13 +349,12 @@ def analyse_narrow(entries, schema_type):
 
         vc_index  = list(vc_series.index)
         vc_values = list(vc_series.values)
-        limit     = min(len(vc_index), MAX_VALS)
+        limit     = len(vc_index)
 
         for rank in range(limit):
             val_str = str(vc_index[rank])
             cnt_int = int(vc_values[rank])
             pct     = round(cnt_int / denom * 100, 2)
-
             csv_row = [
                 str(schema_type), col_name, col_name, "string",
                 val_str, cnt_int, float(pct),
@@ -333,7 +362,6 @@ def analyse_narrow(entries, schema_type):
                 int(distinct_count), str(min_v), str(max_v),
             ]
             csv_rows.append(csv_row)
-
             if rank < TOP_N:
                 val_row = [
                     str(schema_type), col_name, col_name, "string",
@@ -349,8 +377,12 @@ print("CELL 6 DONE")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 7 ── Main loop  (NO generator expressions)
+# CELL 7 ── Main loop
 # ─────────────────────────────────────────────────────────────────────────────
+import boto3
+import pandas as pd
+from datetime import datetime
+
 CSV_COLS     = ["schema_type","column_name","original_name","data_type",
                 "value","value_count","value_pct","total_rows",
                 "null_count","distinct_count","min_value","max_value"]
@@ -367,14 +399,18 @@ all_profile = []
 all_values  = []
 all_summary = []
 
+s3c_loop = boto3.client("s3")
+
 for st in schema_types:
     entries  = by_schema[st]
     num_cols = schema_col_counts.get(st, 0)
     is_wide  = num_cols > WIDE_COLS
 
     print("\n" + "="*55)
-    print("schema={}  cols={}  wide={}  files={}".format(
-        st, num_cols, is_wide, len(entries)))
+    print("schema=" + st
+          + "  cols=" + str(num_cols)
+          + "  wide=" + str(is_wide)
+          + "  files=" + str(len(entries)))
     print("="*55)
 
     if is_wide:
@@ -382,34 +418,32 @@ for st in schema_types:
     else:
         p, v, c, total_rows = analyse_narrow(entries, st)
 
-    # extend using for loops — NO generator
     for row in p:
         all_profile.append(row)
     for row in v:
         all_values.append(row)
 
-    # Write CSV immediately
     if len(c) > 0:
         csv_pdf = pd.DataFrame(c, columns=CSV_COLS)
         csv_pdf.sort_values(
             ["column_name", "value_count"],
             ascending=[True, False],
             inplace=True)
-        csv_key = OUTPUT_PREFIX + "csv_analysis/" + st + "_column_value_mapping.csv"
-        s3c.put_object(
+        csv_key = (OUTPUT_PREFIX + "csv_analysis/"
+                   + st + "_column_value_mapping.csv")
+        s3c_loop.put_object(
             Bucket=OUTPUT_BUCKET,
             Key=csv_key,
             Body=csv_pdf.to_csv(index=False).encode("utf-8"),
             ContentType="text/csv",
         )
-        print("CSV saved rows={} key={}".format(len(csv_pdf), csv_key))
+        print("CSV saved  rows=" + str(len(csv_pdf))
+              + "  key=" + csv_key)
         print(csv_pdf.head(3).to_string(index=False))
 
-    # Count unique column names — NO generator
     unique_cols = dict()
     for row in p:
-        col_name = row[1]
-        unique_cols[col_name] = 1
+        unique_cols[row[1]] = 1
     n_unique = int(len(unique_cols))
 
     summary_row = [
@@ -421,30 +455,32 @@ for st in schema_types:
     ]
     all_summary.append(summary_row)
 
-print("\nCELL 7 DONE — schemas processed={}".format(len(schema_types)))
+print("\nCELL 7 DONE  schemas=" + str(len(schema_types)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CELL 8 ── Build Spark DataFrames via pandas
+# CELL 8 ── Spark DataFrames + write Parquet
 # ─────────────────────────────────────────────────────────────────────────────
+import pandas as pd
+
 def make_spark_df(rows, col_names, int_cols, float_cols):
+    import pandas as _pd
     if len(rows) > 0:
-        pdf = pd.DataFrame(rows, columns=col_names)
+        pdf = _pd.DataFrame(rows, columns=col_names)
     else:
-        pdf = pd.DataFrame(columns=col_names)
+        pdf = _pd.DataFrame(columns=col_names)
 
     for c in col_names:
         if c in int_cols:
-            pdf[c] = pd.to_numeric(
+            pdf[c] = _pd.to_numeric(
                 pdf[c], errors="coerce").fillna(0).astype("int64")
         elif c in float_cols:
-            pdf[c] = pd.to_numeric(
+            pdf[c] = _pd.to_numeric(
                 pdf[c], errors="coerce").fillna(0.0).astype("float64")
         else:
             pdf[c] = pdf[c].fillna("").astype(str)
 
-    sdf = spark.createDataFrame(pdf)
-    return sdf
+    return spark.createDataFrame(pdf)
 
 
 PROFILE_INT   = ["total_rows", "null_count", "distinct_count"]
@@ -453,19 +489,22 @@ VALUES_INT    = ["value_count", "value_rank", "total_rows"]
 VALUES_FLOAT  = ["value_pct"]
 SUMMARY_INT   = ["total_columns", "total_rows", "file_count", "date_count"]
 
-profile_df = make_spark_df(all_profile, PROFILE_COLS, PROFILE_INT, PROFILE_FLOAT)
-values_df  = make_spark_df(all_values,  VALUES_COLS,  VALUES_INT,  VALUES_FLOAT)
-summary_df = make_spark_df(all_summary, SUMMARY_COLS, SUMMARY_INT, [])
+profile_df = make_spark_df(
+    all_profile, PROFILE_COLS, PROFILE_INT, PROFILE_FLOAT)
+values_df  = make_spark_df(
+    all_values,  VALUES_COLS,  VALUES_INT,  VALUES_FLOAT)
+summary_df = make_spark_df(
+    all_summary, SUMMARY_COLS, SUMMARY_INT, [])
 
 print("CELL 8 DONE")
-print("profile rows={}".format(profile_df.count()))
-print("values  rows={}".format(values_df.count()))
-print("summary rows={}".format(summary_df.count()))
-
+print("profile=" + str(profile_df.count()))
+print("values="  + str(values_df.count()))
+print("summary=" + str(summary_df.count()))
 summary_df.show(truncate=False)
 profile_df.show(10, truncate=False)
 
-base = "s3://" + OUTPUT_BUCKET + "/" + OUTPUT_PREFIX + "quicksight_tables"
+base = ("s3://" + OUTPUT_BUCKET + "/"
+        + OUTPUT_PREFIX + "quicksight_tables")
 
 profile_df.repartition(1, "schema_type") \
     .write.partitionBy("schema_type") \
@@ -488,6 +527,8 @@ print("schema_summary written")
 # ─────────────────────────────────────────────────────────────────────────────
 # CELL 9 ── Glue Catalog + commit
 # ─────────────────────────────────────────────────────────────────────────────
+import boto3
+
 glue_db     = "penske_iot_reporting"
 glue_client = boto3.client("glue")
 
@@ -497,13 +538,14 @@ try:
             "Name": glue_db,
             "Description": "Penske IoT reporting",
         })
-    print("DB created: {}".format(glue_db))
+    print("DB created: " + glue_db)
 except glue_client.exceptions.AlreadyExistsException:
-    print("DB exists: {}".format(glue_db))
+    print("DB exists:  " + glue_db)
 
 
 def register_table(tbl_name, path, col_names,
                    int_cols, float_cols, pk=None):
+    import boto3 as _boto3
     cols = []
     for c in col_names:
         if c == pk:
@@ -514,8 +556,7 @@ def register_table(tbl_name, path, col_names,
             glue_type = "double"
         else:
             glue_type = "string"
-        col_entry = {"Name": c, "Type": glue_type}
-        cols.append(col_entry)
+        cols.append({"Name": c, "Type": glue_type})
 
     if pk is not None:
         part_keys = [{"Name": pk, "Type": "string"}]
@@ -550,23 +591,27 @@ def register_table(tbl_name, path, col_names,
         },
     }
     try:
-        glue_client.create_table(DatabaseName=glue_db, TableInput=tbl)
-        print("Created {}.{}".format(glue_db, tbl_name))
-    except glue_client.exceptions.AlreadyExistsException:
-        glue_client.update_table(DatabaseName=glue_db, TableInput=tbl)
-        print("Updated {}.{}".format(glue_db, tbl_name))
+        _boto3.client("glue").create_table(
+            DatabaseName=glue_db, TableInput=tbl)
+        print("Created " + glue_db + "." + tbl_name)
+    except _boto3.client("glue").exceptions.AlreadyExistsException:
+        _boto3.client("glue").update_table(
+            DatabaseName=glue_db, TableInput=tbl)
+        print("Updated " + glue_db + "." + tbl_name)
     try:
-        boto3.client("athena").start_query_execution(
-            QueryString="MSCK REPAIR TABLE {}.{}".format(
-                glue_db, tbl_name),
+        _boto3.client("athena").start_query_execution(
+            QueryString=(
+                "MSCK REPAIR TABLE "
+                + glue_db + "." + tbl_name),
             ResultConfiguration={
-                "OutputLocation": "s3://" + OUTPUT_BUCKET
-                                  + "/athena-query-results/",
+                "OutputLocation": (
+                    "s3://" + OUTPUT_BUCKET
+                    + "/athena-query-results/"),
             },
         )
-        print("Partitions repaired for {}".format(tbl_name))
+        print("Partitions repaired for " + tbl_name)
     except Exception as e:
-        print("Partition repair skipped: {}".format(e))
+        print("Partition repair skipped: " + str(e))
 
 
 register_table(
