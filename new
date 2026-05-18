@@ -1,14 +1,12 @@
 # ============================================================
 # S3 Vehicle Data Schema Unification (Pure Python)
-# Discovers SchemaType*.parquet files across date/time partitions,
-# unifies each SchemaType into one canonical schema, and writes
-# unified parquet + a column->type->sample-values mapping back to S3.
+# Output: ONE CSV per SchemaType containing all rows from
+# every partition's matching parquet files, plus a mapping CSV.
 # ============================================================
 
 import boto3
 import pandas as pd
 import pyarrow.parquet as pq
-import pyarrow as pa
 import s3fs
 import re
 import io
@@ -82,6 +80,17 @@ def canonical_schema(variants):
             canon[col] = widen(canon[col], dtype) if col in canon else dtype
     return canon
 
+def extract_partition_info(s3_path):
+    """Pull date/time partitions out of the S3 key, e.g. .../20260402/151500/file.parquet"""
+    parts = s3_path.split("/")
+    date_part, time_part = None, None
+    for p in parts:
+        if re.fullmatch(r"\d{8}", p):
+            date_part = p
+        elif re.fullmatch(r"\d{6}", p):
+            time_part = p
+    return date_part, time_part
+
 def align_df_to_canonical(df, canon, source_file, schema_type):
     df.columns = [c.lower() for c in df.columns]
     out = pd.DataFrame()
@@ -94,6 +103,9 @@ def align_df_to_canonical(df, canon, source_file, schema_type):
                 out[col] = df[col].astype("string")
         else:
             out[col] = pd.Series([pd.NA] * len(df), dtype=target)
+    date_part, time_part = extract_partition_info(source_file)
+    out["_partition_date"] = date_part
+    out["_partition_time"] = time_part
     out["_source_file"] = source_file
     out["_schema_type"] = schema_type
     return out
@@ -120,10 +132,11 @@ def build_mapping(stype, canon, df):
         })
     return rows
 
-def write_parquet_to_s3(df, s3_path):
-    table = pa.Table.from_pandas(df)
-    with fs.open(s3_path, "wb") as f:
-        pq.write_table(table, f)
+def write_csv_to_s3(df, bucket, key):
+    """Stream a DataFrame to a single CSV object in S3."""
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
 
 # ---------- MAIN PIPELINE ----------
 print(f"Scanning s3://{BUCKET}/{ROOT_PREFIX} ...")
@@ -141,7 +154,6 @@ print("\nFiles per SchemaType:")
 for stype, paths in sorted(schema_groups.items()):
     print(f"  SchemaType{stype}: {len(paths)} files")
 
-unified_by_type = {}
 mapping_rows = []
 
 for stype, paths in sorted(schema_groups.items()):
@@ -152,25 +164,23 @@ for stype, paths in sorted(schema_groups.items()):
     print(f"  Canonical columns: {len(canon)}")
     df = unify_schema_type(stype, paths, canon)
     print(f"  Unified rows: {len(df)}")
-    unified_by_type[stype] = (canon, df)
+
     mapping_rows.extend(build_mapping(stype, canon, df))
 
     if not df.empty:
-        out_path = f"s3://{BUCKET}/{OUTPUT_PREFIX}SchemaType{stype}/unified.parquet"
-        write_parquet_to_s3(df, out_path)
-        print(f"  Wrote → {out_path}")
+        out_key = f"{OUTPUT_PREFIX}SchemaType{stype}/SchemaType{stype}_all_partitions.csv"
+        write_csv_to_s3(df, BUCKET, out_key)
+        print(f"  Wrote single CSV → s3://{BUCKET}/{out_key}")
 
 # ---------- MAPPING OUTPUT ----------
 mapping_df = pd.DataFrame(mapping_rows)
 print("\n========== Column / Type / Sample-Value Mapping ==========")
 print(mapping_df.to_string(index=False))
 
-csv_buf = io.StringIO()
-mapping_df.to_csv(csv_buf, index=False)
-s3.put_object(
-    Bucket=BUCKET,
-    Key=f"{OUTPUT_PREFIX}_schema_mapping/mapping.csv",
-    Body=csv_buf.getvalue(),
+write_csv_to_s3(
+    mapping_df,
+    BUCKET,
+    f"{OUTPUT_PREFIX}_schema_mapping/mapping.csv",
 )
 print(f"\nMapping CSV → s3://{BUCKET}/{OUTPUT_PREFIX}_schema_mapping/mapping.csv")
 print("\nDone.")
