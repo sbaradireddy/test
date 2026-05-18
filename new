@@ -1,0 +1,176 @@
+# ============================================================
+# S3 Vehicle Data Schema Unification (Pure Python)
+# Discovers SchemaType*.parquet files across date/time partitions,
+# unifies each SchemaType into one canonical schema, and writes
+# unified parquet + a column->type->sample-values mapping back to S3.
+# ============================================================
+
+import boto3
+import pandas as pd
+import pyarrow.parquet as pq
+import pyarrow as pa
+import s3fs
+import re
+import io
+from collections import defaultdict
+
+# ---------- CONFIG ----------
+BUCKET = "pske-stg-maintenance"
+ROOT_PREFIX = "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.campaigns.events/"
+OUTPUT_PREFIX = "projects/ard-iot-data/unified/"
+SAMPLES_PER_COL = 3
+
+s3 = boto3.client("s3")
+fs = s3fs.S3FileSystem()
+
+# ---------- TYPE HANDLING ----------
+TYPE_RANK = {
+    "bool": 1, "boolean": 1,
+    "int8": 2, "int16": 3, "int32": 4, "int64": 5,
+    "uint8": 2, "uint16": 3, "uint32": 4, "uint64": 5,
+    "float": 6, "float32": 6, "float64": 7, "double": 7,
+    "date32[day]": 8, "date64[ms]": 8,
+    "timestamp[ns]": 9, "timestamp[us]": 9, "timestamp[ms]": 9,
+    "string": 10, "large_string": 10, "object": 10,
+}
+
+def widen(t1, t2):
+    if t1 == t2:
+        return t1
+    if t1.startswith("decimal") or t2.startswith("decimal"):
+        return "string"
+    return t1 if TYPE_RANK.get(t1, 99) >= TYPE_RANK.get(t2, 99) else t2
+
+def to_pandas_dtype(arrow_type_str):
+    t = arrow_type_str.lower()
+    if "int" in t and "uint" not in t: return "Int64"
+    if "uint" in t: return "UInt64"
+    if "float" in t or "double" in t: return "float64"
+    if "bool" in t: return "boolean"
+    if "timestamp" in t or "date" in t: return "datetime64[ns]"
+    return "string"
+
+# ---------- HELPERS ----------
+def list_all_parquet(bucket, prefix):
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if obj["Key"].lower().endswith(".parquet"):
+                keys.append(obj["Key"])
+    return keys
+
+def read_parquet_schema(s3_path):
+    pf = pq.ParquetFile(s3_path, filesystem=fs)
+    return [(f.name, str(f.type)) for f in pf.schema_arrow]
+
+def profile_schema_variants(paths):
+    variants = defaultdict(list)
+    for p in paths:
+        try:
+            cols = read_parquet_schema(p)
+            sig = tuple(sorted((c.lower(), t) for c, t in cols))
+            variants[sig].append(p)
+        except Exception as e:
+            print(f"  Skip metadata read {p}: {e}")
+    return variants
+
+def canonical_schema(variants):
+    canon = {}
+    for sig in variants.keys():
+        for col, dtype in sig:
+            canon[col] = widen(canon[col], dtype) if col in canon else dtype
+    return canon
+
+def align_df_to_canonical(df, canon, source_file, schema_type):
+    df.columns = [c.lower() for c in df.columns]
+    out = pd.DataFrame()
+    for col, dtype in canon.items():
+        target = to_pandas_dtype(dtype)
+        if col in df.columns:
+            try:
+                out[col] = df[col].astype(target, errors="ignore")
+            except Exception:
+                out[col] = df[col].astype("string")
+        else:
+            out[col] = pd.Series([pd.NA] * len(df), dtype=target)
+    out["_source_file"] = source_file
+    out["_schema_type"] = schema_type
+    return out
+
+def unify_schema_type(stype, paths, canon):
+    frames = []
+    for p in paths:
+        try:
+            df = pd.read_parquet(p, filesystem=fs)
+            frames.append(align_df_to_canonical(df, canon, p, f"SchemaType{stype}"))
+        except Exception as e:
+            print(f"  Skip data read {p}: {e}")
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+def build_mapping(stype, canon, df):
+    rows = []
+    for col, dtype in canon.items():
+        vals = df[col].dropna().head(SAMPLES_PER_COL).tolist() if col in df.columns else []
+        rows.append({
+            "schema_type": f"SchemaType{stype}",
+            "column": col,
+            "data_type": dtype,
+            "sample_values": str(vals),
+        })
+    return rows
+
+def write_parquet_to_s3(df, s3_path):
+    table = pa.Table.from_pandas(df)
+    with fs.open(s3_path, "wb") as f:
+        pq.write_table(table, f)
+
+# ---------- MAIN PIPELINE ----------
+print(f"Scanning s3://{BUCKET}/{ROOT_PREFIX} ...")
+all_files = list_all_parquet(BUCKET, ROOT_PREFIX)
+print(f"Found {len(all_files)} parquet files")
+
+pattern = re.compile(r"SchemaType(\d+)[-_].*\.parquet$", re.IGNORECASE)
+schema_groups = defaultdict(list)
+for key in all_files:
+    m = pattern.search(key.split("/")[-1])
+    if m:
+        schema_groups[int(m.group(1))].append(f"s3://{BUCKET}/{key}")
+
+print("\nFiles per SchemaType:")
+for stype, paths in sorted(schema_groups.items()):
+    print(f"  SchemaType{stype}: {len(paths)} files")
+
+unified_by_type = {}
+mapping_rows = []
+
+for stype, paths in sorted(schema_groups.items()):
+    print(f"\n=== Processing SchemaType{stype} ({len(paths)} files) ===")
+    variants = profile_schema_variants(paths)
+    print(f"  Distinct schema variants: {len(variants)}")
+    canon = canonical_schema(variants)
+    print(f"  Canonical columns: {len(canon)}")
+    df = unify_schema_type(stype, paths, canon)
+    print(f"  Unified rows: {len(df)}")
+    unified_by_type[stype] = (canon, df)
+    mapping_rows.extend(build_mapping(stype, canon, df))
+
+    if not df.empty:
+        out_path = f"s3://{BUCKET}/{OUTPUT_PREFIX}SchemaType{stype}/unified.parquet"
+        write_parquet_to_s3(df, out_path)
+        print(f"  Wrote → {out_path}")
+
+# ---------- MAPPING OUTPUT ----------
+mapping_df = pd.DataFrame(mapping_rows)
+print("\n========== Column / Type / Sample-Value Mapping ==========")
+print(mapping_df.to_string(index=False))
+
+csv_buf = io.StringIO()
+mapping_df.to_csv(csv_buf, index=False)
+s3.put_object(
+    Bucket=BUCKET,
+    Key=f"{OUTPUT_PREFIX}_schema_mapping/mapping.csv",
+    Body=csv_buf.getvalue(),
+)
+print(f"\nMapping CSV → s3://{BUCKET}/{OUTPUT_PREFIX}_schema_mapping/mapping.csv")
+print("\nDone.")
