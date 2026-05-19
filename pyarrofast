@@ -1,0 +1,182 @@
+import sys
+import boto3
+import pyarrow.parquet as pq
+from io import BytesIO
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, ArrayType, MapType
+from datetime import datetime
+
+# ── init ──────────────────────────────────────────────────────────────────────
+args  = getResolvedOptions(sys.argv, ["JOB_NAME"])
+sc    = SparkContext()
+glue  = GlueContext(sc)
+spark = glue.spark_session
+job   = Job(glue)
+job.init(args["JOB_NAME"], args)
+
+BUCKET      = "pske-stg-maintenance"
+PREFIX      = "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.measurements.results/"
+OUTPUT_PATH = "s3://pske-stg-maintenance/projects/ard-iot-data/reporting/csv-outputs/"
+RUN_TS      = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+SAMPLE_ROWS = 3
+s3          = boto3.client("s3")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1 — find ONE file per SchemaType via S3 listing (no data read)
+# ══════════════════════════════════════════════════════════════════════════════
+print("Scanning S3 for one sample file per SchemaType ...")
+
+schema_samples = {}
+paginator = s3.get_paginator("list_objects_v2")
+
+for page in paginator.paginate(Bucket=BUCKET, Prefix=PREFIX):
+    for obj in page.get("Contents", []):
+        key = obj["Key"]
+        if not key.endswith(".parquet"):
+            continue
+        schema_name = key.split("/")[-1].split("-")[0]
+        if schema_name not in schema_samples:
+            schema_samples[schema_name] = key   # store raw key, not s3:// path
+
+print(f"Found {len(schema_samples)} SchemaTypes: {sorted(schema_samples.keys())}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2 — PyArrow helpers (runs on driver, zero Spark overhead)
+# ══════════════════════════════════════════════════════════════════════════════
+def read_parquet_head(bucket, key, n_rows):
+    """Read only the first n_rows from a parquet file using PyArrow — no Spark."""
+    obj  = s3.get_object(Bucket=bucket, Key=key)
+    pf   = pq.ParquetFile(BytesIO(obj["Body"].read()))
+    # read first row group only — usually a few thousand rows, very fast
+    batch = next(pf.iter_batches(batch_size=n_rows))
+    return batch.to_pydict()   # { col_name: [val, val, val ...] }
+
+
+def flatten_pyarrow_schema(schema, prefix=""):
+    """Recursively flatten a PyArrow schema → list of (col_name, dtype_str)."""
+    cols = []
+    for field in schema:
+        path  = f"{prefix}.{field.name}" if prefix else field.name
+        dtype = field.type
+        import pyarrow as pa
+        if pa.types.is_struct(dtype):
+            cols.extend(flatten_pyarrow_schema(dtype, prefix=path))
+        elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype):
+            elem = dtype.value_type
+            if pa.types.is_struct(elem):
+                cols.extend(flatten_pyarrow_schema(elem, prefix=f"{path}[]"))
+            else:
+                cols.append((f"{path}[]", str(elem)))
+        elif pa.types.is_map(dtype):
+            cols.append((f"{path}[key]",   str(dtype.key_type)))
+            cols.append((f"{path}[value]", str(dtype.item_type)))
+        else:
+            cols.append((path, str(dtype)))
+    return cols
+
+
+def get_sample_value(raw_data, col_path, row_idx):
+    """
+    Safely extract one sample value from raw PyArrow dict.
+    Handles nested paths (vehicle.vin) and array paths (readings[]).
+    """
+    try:
+        # top-level key lookup (handles nested structs already flattened by PyArrow)
+        top_key = col_path.split(".")[0].rstrip("[]")
+        values  = raw_data.get(top_key, [])
+        if row_idx >= len(values):
+            return ""
+        val = values[row_idx]
+        if val is None:
+            return ""
+        return str(val)
+    except Exception:
+        return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — build schema + sample map PURELY on driver using PyArrow
+#           zero Spark jobs triggered here — runs in seconds
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nBuilding schema map with samples (PyArrow on driver) ...")
+
+all_schema_maps = []
+
+for schema_name, key in sorted(schema_samples.items()):
+    print(f"  {schema_name} ...")
+
+    # read first SAMPLE_ROWS rows only — PyArrow, no Spark
+    raw_data   = read_parquet_head(BUCKET, key, SAMPLE_ROWS)
+    obj        = s3.get_object(Bucket=BUCKET, Key=key)
+    pf         = pq.ParquetFile(BytesIO(obj["Body"].read()))
+    flat_cols  = flatten_pyarrow_schema(pf.schema_arrow)
+
+    for col_name, dtype_str in flat_cols:
+        all_schema_maps.append((
+            schema_name,
+            col_name,
+            dtype_str,
+            get_sample_value(raw_data, col_name, 0),
+            get_sample_value(raw_data, col_name, 1),
+            get_sample_value(raw_data, col_name, 2),
+        ))
+
+print(f"  Total mapping rows collected: {len(all_schema_maps):,}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4 — write schema map CSV  (tiny DataFrame — instant)
+# ══════════════════════════════════════════════════════════════════════════════
+schema_map_df = spark.createDataFrame(
+    all_schema_maps,
+    ["schema_type", "column_name", "data_type",
+     "sample_value_1", "sample_value_2", "sample_value_3"]
+)
+
+(schema_map_df
+ .orderBy("schema_type", "column_name")
+ .coalesce(1)
+ .write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}all_schema_mapping_{RUN_TS}/"))
+
+print(f"Schema map written → {OUTPUT_PATH}all_schema_mapping_{RUN_TS}/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 5 — write flat data CSV per SchemaType  (Spark used only here)
+# ══════════════════════════════════════════════════════════════════════════════
+def get_spark_flat_cols(schema, prefix=""):
+    exprs = []
+    for field in schema.fields:
+        path    = f"{prefix}.{field.name}" if prefix else field.name
+        parts   = path.split(".")
+        col_ref = F.col(".".join(f"`{p}`" for p in parts))
+        dtype   = field.dataType
+        if isinstance(dtype, StructType):
+            exprs.extend(get_spark_flat_cols(dtype, prefix=path))
+        elif isinstance(dtype, (ArrayType, MapType)):
+            exprs.append(col_ref.cast("string").alias(path))
+        else:
+            exprs.append(col_ref.alias(path))
+    return exprs
+
+print("\nWriting flat data CSVs per SchemaType ...")
+
+for schema_name, key in sorted(schema_samples.items()):
+    s3_path = f"s3://{BUCKET}/{key}"
+    raw_df  = spark.read.parquet(s3_path)
+    flat_df = raw_df.select(get_spark_flat_cols(raw_df.schema))
+
+    (flat_df
+     .coalesce(1)
+     .write.mode("overwrite")
+     .option("header", "true")
+     .csv(f"{OUTPUT_PATH}{schema_name}_data_{RUN_TS}/"))
+
+    print(f"  {schema_name} written → {OUTPUT_PATH}{schema_name}_data_{RUN_TS}/")
+
+print("\nDONE")
+job.commit()
