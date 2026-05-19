@@ -1,0 +1,133 @@
+import sys
+import boto3
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, ArrayType, MapType
+from datetime import datetime
+
+# ── init ──────────────────────────────────────────────────────────────────────
+args  = getResolvedOptions(sys.argv, ["JOB_NAME"])
+sc    = SparkContext()
+glue  = GlueContext(sc)
+spark = glue.spark_session
+job   = Job(glue)
+job.init(args["JOB_NAME"], args)
+
+BUCKET      = "pske-stg-maintenance"
+PREFIX      = "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.measurements.results/"
+OUTPUT_PATH = "s3://pske-stg-maintenance/projects/ard-iot-data/reporting/csv-outputs/"
+RUN_TS      = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+SAMPLE_ROWS = 3        # how many sample values to show per column
+s3          = boto3.client("s3")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1 — find ONE file per SchemaType (no data read yet)
+# ══════════════════════════════════════════════════════════════════════════════
+print("Scanning S3 for one sample file per SchemaType ...")
+
+schema_samples = {}
+paginator = s3.get_paginator("list_objects_v2")
+
+for page in paginator.paginate(Bucket=BUCKET, Prefix=PREFIX):
+    for obj in page.get("Contents", []):
+        key = obj["Key"]
+        if not key.endswith(".parquet"):
+            continue
+        schema_name = key.split("/")[-1].split("-")[0]   # SchemaType1, SchemaType10 ...
+        if schema_name not in schema_samples:
+            schema_samples[schema_name] = f"s3://{BUCKET}/{key}"
+
+print(f"Found {len(schema_samples)} SchemaTypes: {sorted(schema_samples.keys())}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2 — flatten helper
+# ══════════════════════════════════════════════════════════════════════════════
+def get_flat_cols(schema, prefix=""):
+    exprs = []
+    for field in schema.fields:
+        path    = f"{prefix}.{field.name}" if prefix else field.name
+        parts   = path.split(".")
+        col_ref = F.col(".".join(f"`{p}`" for p in parts))
+        dtype   = field.dataType
+
+        if isinstance(dtype, StructType):
+            exprs.extend(get_flat_cols(dtype, prefix=path))
+        elif isinstance(dtype, (ArrayType, MapType)):
+            exprs.append(col_ref.cast("string").alias(path))
+        else:
+            exprs.append(col_ref.alias(path))
+    return exprs
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — process each SchemaType
+# ══════════════════════════════════════════════════════════════════════════════
+all_schema_maps  = []   # combined schema + sample report across all types
+
+for schema_name, s3_path in sorted(schema_samples.items()):
+    print(f"\nProcessing {schema_name} ...")
+
+    # read one file only
+    raw_df   = spark.read.parquet(s3_path)
+    flat_df  = raw_df.select(get_flat_cols(raw_df.schema))
+    col_list = flat_df.columns
+    print(f"  flat cols: {len(col_list)}")
+
+    # ── collect SAMPLE_ROWS rows to driver once ────────────────────────────
+    # cast everything to string so collect() never fails on complex types
+    sample_df = flat_df.select(
+        [F.col(f"`{c}`").cast("string").alias(c) for c in col_list]
+    ).limit(SAMPLE_ROWS)
+
+    sample_rows = sample_df.collect()   # tiny — only SAMPLE_ROWS rows
+
+    # ── build schema + sample report for this SchemaType ──────────────────
+    for field in flat_df.schema.fields:
+        col  = field.name
+        dtype = str(field.dataType)
+
+        # pull sample values from the collected rows (skip None)
+        samples = [
+            str(row[col]) for row in sample_rows
+            if row[col] is not None
+        ]
+
+        all_schema_maps.append((
+            schema_name,
+            col,
+            dtype,
+            samples[0] if len(samples) > 0 else "",
+            samples[1] if len(samples) > 1 else "",
+            samples[2] if len(samples) > 2 else "",
+        ))
+
+    # ── write flattened data CSV for this SchemaType ───────────────────────
+    (flat_df
+     .coalesce(1)
+     .write.mode("overwrite")
+     .option("header", "true")
+     .csv(f"{OUTPUT_PATH}{schema_name}_data_{RUN_TS}/"))
+
+    print(f"  Data CSV written → {OUTPUT_PATH}{schema_name}_data_{RUN_TS}/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4 — write combined schema + sample report (one CSV for all SchemaTypes)
+# ══════════════════════════════════════════════════════════════════════════════
+schema_map_df = spark.createDataFrame(
+    all_schema_maps,
+    ["schema_type", "column_name", "data_type",
+     "sample_value_1", "sample_value_2", "sample_value_3"]
+)
+
+(schema_map_df
+ .orderBy("schema_type", "column_name")
+ .coalesce(1)
+ .write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}all_schema_mapping_{RUN_TS}/"))
+
+print(f"\nSchema + sample report → {OUTPUT_PATH}all_schema_mapping_{RUN_TS}/")
+print("DONE")
+job.commit()
