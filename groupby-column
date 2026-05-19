@@ -1,0 +1,170 @@
+import sys
+import boto3
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import functions as F
+from datetime import datetime
+
+# ── init ──────────────────────────────────────────────────────────────────────
+args  = getResolvedOptions(sys.argv, ["JOB_NAME"])
+sc    = SparkContext()
+glue  = GlueContext(sc)
+spark = glue.spark_session
+job   = Job(glue)
+job.init(args["JOB_NAME"], args)
+
+# ── config ─────────────────────────────────────────────────────────────────────
+BUCKET      = "pske-stg-maintenance"
+OUTPUT_PATH = "s3://pske-stg-maintenance/projects/ard-iot-data/reporting/csv-outputs/"
+RUN_TS      = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+s3          = boto3.client("s3")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1 — find latest all_schema_mapping CSV automatically
+# ══════════════════════════════════════════════════════════════════════════════
+print("Locating latest all_schema_mapping file ...")
+
+PREFIX      = "projects/ard-iot-data/reporting/csv-outputs/"
+paginator   = s3.get_paginator("list_objects_v2")
+mapping_keys = []
+
+for page in paginator.paginate(Bucket=BUCKET, Prefix=PREFIX):
+    for obj in page.get("Contents", []):
+        key = obj["Key"]
+        if "all_schema_mapping" in key and key.endswith(".csv"):
+            mapping_keys.append(key)
+
+if not mapping_keys:
+    raise FileNotFoundError("No all_schema_mapping CSV found in output path.")
+
+# pick the most recent one by key name (timestamp is in folder name)
+latest_key  = sorted(mapping_keys)[-1]
+SOURCE_PATH = f"s3://{BUCKET}/{latest_key}"
+print(f"  Using: {SOURCE_PATH}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2 — read schema mapping CSV
+# ══════════════════════════════════════════════════════════════════════════════
+df = (spark.read
+      .option("header", "true")
+      .option("inferSchema", "false")   # all string — no type surprises
+      .csv(SOURCE_PATH))
+
+df.cache()
+print(f"  Rows loaded: {df.count():,}")
+print(f"  Columns    : {df.columns}")
+
+# expected columns:
+# schema_type | column_name | data_type | sample_value_1 | sample_value_2 | sample_value_3
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — GROUP BY column_name
+#   → for each column, which schema_types contain it + all their data_types
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nGrouping by column_name ...")
+
+by_column = (df
+    .groupBy("column_name")
+    .agg(
+        # how many schema types have this column
+        F.countDistinct("schema_type")
+         .alias("schema_count"),
+
+        # comma-separated list of schema types that contain this column
+        F.concat_ws(", ", F.collect_set("schema_type"))
+         .alias("present_in_schemas"),
+
+        # all data types seen for this column across schemas
+        F.concat_ws(", ", F.collect_set("data_type"))
+         .alias("data_types"),
+
+        # all sample values seen across schemas (deduplicated)
+        F.concat_ws(" | ", F.collect_set("sample_value_1"))
+         .alias("sample_values_1"),
+
+        F.concat_ws(" | ", F.collect_set("sample_value_2"))
+         .alias("sample_values_2"),
+
+        F.concat_ws(" | ", F.collect_set("sample_value_3"))
+         .alias("sample_values_3"),
+    )
+    .orderBy(F.desc("schema_count"), "column_name")
+)
+
+(by_column
+ .coalesce(1)
+ .write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}grouped_by_column_{RUN_TS}/"))
+
+print(f"  Written → {OUTPUT_PATH}grouped_by_column_{RUN_TS}/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4 — GROUP BY schema_type
+#   → for each schema, all its columns + data types + samples in one row view
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nGrouping by schema_type ...")
+
+by_schema = (df
+    .groupBy("schema_type")
+    .agg(
+        # total columns in this schema
+        F.count("column_name")
+         .alias("total_columns"),
+
+        # all column names as comma-separated list
+        F.concat_ws(", ", F.collect_list("column_name"))
+         .alias("all_columns"),
+
+        # all data types (distinct) used in this schema
+        F.concat_ws(", ", F.collect_set("data_type"))
+         .alias("distinct_data_types"),
+
+        # count of distinct data types
+        F.countDistinct("data_type")
+         .alias("data_type_count"),
+    )
+    .orderBy("schema_type")
+)
+
+(by_schema
+ .coalesce(1)
+ .write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}grouped_by_schema_{RUN_TS}/"))
+
+print(f"  Written → {OUTPUT_PATH}grouped_by_schema_{RUN_TS}/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 5 — COMBINED VIEW: column_name + schema_type side by side
+#   → pivot table: rows = column_name, columns = each schema_type
+#     cell value = data_type (empty if column not in that schema)
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nBuilding pivot view (column × schema_type) ...")
+
+# collect distinct schema types to build pivot columns
+schema_type_list = sorted([
+    row["schema_type"]
+    for row in df.select("schema_type").distinct().collect()
+])
+print(f"  Schema types: {schema_type_list}")
+
+pivot_df = (df
+    .groupBy("column_name")
+    .pivot("schema_type", schema_type_list)   # one column per SchemaType
+    .agg(F.first("data_type"))                # data_type in that schema, null if absent
+    .orderBy("column_name")
+)
+
+(pivot_df
+ .coalesce(1)
+ .write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}pivot_column_x_schema_{RUN_TS}/"))
+
+print(f"  Written → {OUTPUT_PATH}pivot_column_x_schema_{RUN_TS}/")
+
+print("\nDONE")
+job.commit()
