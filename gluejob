@@ -1,3 +1,58 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4 — column stats (FAST: reuse presence_wide, one extra pass for totals)
+# ══════════════════════════════════════════════════════════════════════════════
+print("Computing column stats …")
+
+total_rows = flat_df.count()
+
+# Total non-null across ALL schema types per column
+total_non_null = {
+    col: sum((row[col] or 0) for row in presence_local)
+    for col in data_cols
+}
+
+# Unique counts — one single aggregation
+unique_exprs = [
+    F.countDistinct(F.col(f"`{c}`")).alias(c)
+    for c in data_cols
+]
+unique_counts = flat_df.agg(*unique_exprs).collect()[0]
+
+# Sample values — one single aggregation (first non-null per column)
+sample_exprs = [
+    F.first(F.col(f"`{c}`"), ignorenulls=True).cast("string").alias(c)
+    for c in data_cols
+]
+sample_vals = flat_df.agg(*sample_exprs).collect()[0]
+
+# Assemble stats DataFrame on the driver — no more per-column Spark jobs
+stat_rows = []
+for col in data_cols:
+    non_null = total_non_null[col]
+    stat_rows.append((
+        col,
+        int(non_null),
+        int(total_rows - non_null),
+        round((1 - non_null / total_rows) * 100, 2) if total_rows > 0 else 0.0,
+        int(unique_counts[col] or 0),
+        str(sample_vals[col]) if sample_vals[col] is not None else "",
+    ))
+
+stats_df = spark.createDataFrame(
+    stat_rows,
+    ["column_name", "non_null_count", "null_count",
+     "null_pct", "unique_values", "sample_value"]
+)
+
+
+
+
+
+
+
+
+
+
 import sys
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
