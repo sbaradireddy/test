@@ -1,0 +1,251 @@
+import boto3
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pandas as pd
+from io import BytesIO, StringIO
+from collections import defaultdict
+from datetime import datetime
+
+# ── config ────────────────────────────────────────────────────────────────────
+s3 = boto3.client("s3")
+
+SOURCE_BUCKET  = "pske-stg-maintenance"
+SOURCE_PREFIX  = "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.measurements.results/"
+
+OUTPUT_BUCKET  = "pske-stg-maintenance"          # same bucket, different prefix
+OUTPUT_PREFIX  = "projects/ard-iot-data/reporting/csv-outputs/"
+
+RUN_TS = datetime.utcnow().strftime("%Y%m%d_%H%M%S")   # timestamp all outputs
+
+# ── helper: write DataFrame → CSV → S3 ──────────────────────────────────────
+def write_csv_to_s3(df: pd.DataFrame, filename: str, description: str = ""):
+    """
+    Serialise df to CSV in-memory, upload to S3.
+    Final S3 key: OUTPUT_PREFIX + filename
+    """
+    buf = StringIO()
+    df.to_csv(buf, index=False)
+    csv_bytes = buf.getvalue().encode("utf-8")
+
+    key = f"{OUTPUT_PREFIX}{filename}"
+    s3.put_object(
+        Bucket=OUTPUT_BUCKET,
+        Key=key,
+        Body=csv_bytes,
+        ContentType="text/csv",
+        Metadata={"generated_at": RUN_TS, "description": description},
+    )
+    print(f"  Written → s3://{OUTPUT_BUCKET}/{key}  ({len(csv_bytes):,} bytes)")
+    return key
+
+
+# ── Step 1: schema discovery ──────────────────────────────────────────────────
+def list_schema_samples(bucket, prefix):
+    schema_samples = {}
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith(".parquet"):
+                continue
+            schema_name = key.split("/")[-1].split("-")[0]   # SchemaType1, SchemaType10 …
+            if schema_name not in schema_samples:
+                schema_samples[schema_name] = key
+    return schema_samples
+
+
+def read_arrow_schema(bucket, key):
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return pq.ParquetFile(BytesIO(obj["Body"].read())).schema_arrow
+
+
+# ── Step 2: flatten nested types ──────────────────────────────────────────────
+def flatten_schema(schema, prefix=""):
+    cols = []
+    for field in schema:
+        col_name = f"{prefix}.{field.name}" if prefix else field.name
+        dtype = field.type
+        if pa.types.is_struct(dtype):
+            cols.extend(flatten_schema(dtype, prefix=col_name))
+        elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype):
+            elem = dtype.value_type
+            if pa.types.is_struct(elem):
+                cols.extend(flatten_schema(elem, prefix=f"{col_name}[]"))
+            else:
+                cols.append((f"{col_name}[]", str(elem)))
+        elif pa.types.is_map(dtype):
+            cols.append((f"{col_name}[key]",   str(dtype.key_type)))
+            cols.append((f"{col_name}[value]", str(dtype.item_type)))
+        else:
+            cols.append((col_name, str(dtype)))
+    return cols
+
+
+# ── Step 3: unified column mapping ───────────────────────────────────────────
+def resolve_dtype(dtypes):
+    unique = set(dtypes)
+    if len(unique) == 1:
+        return unique.pop()
+    if unique <= {"int32", "int64", "float32", "float64"}:
+        return "float64"
+    return "string"
+
+
+def build_column_mapping(all_flat_schemas: dict) -> pd.DataFrame:
+    registry = defaultdict(lambda: {"dtypes": [], "present_in": []})
+    for schema_type, cols in all_flat_schemas.items():
+        for col_name, dtype in cols:
+            registry[col_name]["dtypes"].append(dtype)
+            registry[col_name]["present_in"].append(schema_type)
+
+    rows = []
+    for col_name, info in sorted(registry.items()):
+        present = sorted(set(info["present_in"]))
+        rows.append({
+            "column_name":   col_name,
+            "unified_dtype": resolve_dtype(info["dtypes"]),
+            "raw_dtypes":    " | ".join(sorted(set(info["dtypes"]))),
+            "present_in":    ", ".join(present),
+            "schema_count":  len(present),
+            "is_common":     len(present) == len(all_flat_schemas),  # in ALL schemas
+        })
+    return pd.DataFrame(rows)
+
+
+# ── Step 4: flatten a single parquet file ────────────────────────────────────
+def flatten_row(record, prefix=""):
+    flat = {}
+    for k, v in record.items():
+        full_key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            flat.update(flatten_row(v, prefix=full_key))
+        elif isinstance(v, list):
+            if v and isinstance(v[0], dict):
+                for i, item in enumerate(v):
+                    flat.update(flatten_row(item, prefix=f"{full_key}[{i}]"))
+            else:
+                flat[f"{full_key}[]"] = str(v)   # store list as string in CSV
+        else:
+            flat[full_key] = v
+    return flat
+
+
+def process_parquet_file(bucket, key):
+    schema_type  = key.split("/")[-1].split("-")[0]
+    date_folder  = key.split("/")[-3]
+    mile_folder  = key.split("/")[-2]
+
+    obj   = s3.get_object(Bucket=bucket, Key=key)
+    table = pq.read_table(BytesIO(obj["Body"].read()))
+    df    = table.to_pandas()
+
+    flat_rows = [flatten_row(r) for r in df.to_dict("records")]
+    flat_df   = pd.DataFrame(flat_rows)
+
+    flat_df["_schema_type"] = schema_type
+    flat_df["_date_folder"] = date_folder
+    flat_df["_mile_folder"] = mile_folder
+    flat_df["_source_key"]  = key
+    return flat_df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+print("Step 1 — discovering schema samples …")
+schema_samples = list_schema_samples(SOURCE_BUCKET, SOURCE_PREFIX)
+print(f"  Found: {sorted(schema_samples.keys())}")
+
+print("\nStep 2 — flattening schemas …")
+all_flat_schemas = {}
+for stype, key in schema_samples.items():
+    arrow_schema = read_arrow_schema(SOURCE_BUCKET, key)
+    all_flat_schemas[stype] = flatten_schema(arrow_schema)
+    print(f"  {stype}: {len(all_flat_schemas[stype])} flat columns")
+
+print("\nStep 3 — building column mapping …")
+mapping_df = build_column_mapping(all_flat_schemas)
+
+# ── OUTPUT 1: schema mapping report ──────────────────────────────────────────
+write_csv_to_s3(
+    mapping_df,
+    f"schema_mapping_{RUN_TS}.csv",
+    description="Unified column → dtype → present_in mapping across all SchemaTypes",
+)
+
+# ── OUTPUT 2: per-schema column inventory ────────────────────────────────────
+inventory_rows = []
+for stype, cols in all_flat_schemas.items():
+    for col_name, dtype in cols:
+        inventory_rows.append({
+            "schema_type": stype,
+            "column_name": col_name,
+            "dtype":       dtype,
+        })
+inventory_df = pd.DataFrame(inventory_rows)
+write_csv_to_s3(
+    inventory_df,
+    f"per_schema_inventory_{RUN_TS}.csv",
+    description="Every column in every SchemaType with its raw dtype",
+)
+
+print("\nStep 4 — reading and unifying all parquet files …")
+all_dfs      = []
+errors       = []
+unified_cols = list(mapping_df["column_name"])
+
+paginator = s3.get_paginator("list_objects_v2")
+for page in paginator.paginate(Bucket=SOURCE_BUCKET, Prefix=SOURCE_PREFIX):
+    for obj in page.get("Contents", []):
+        key = obj["Key"]
+        if not key.endswith(".parquet"):
+            continue
+        try:
+            df = process_parquet_file(SOURCE_BUCKET, key)
+            # align to unified column set
+            for col in unified_cols:
+                if col not in df.columns:
+                    df[col] = pd.NA
+            meta_cols = ["_schema_type", "_date_folder", "_mile_folder", "_source_key"]
+            all_dfs.append(df[unified_cols + meta_cols])
+        except Exception as e:
+            errors.append({"key": key, "error": str(e)})
+            print(f"  SKIP {key}: {e}")
+
+unified_df = pd.concat(all_dfs, ignore_index=True)
+print(f"  Unified shape: {unified_df.shape}")
+
+# ── OUTPUT 3: unified data CSV ────────────────────────────────────────────────
+write_csv_to_s3(
+    unified_df,
+    f"unified_vehicle_data_{RUN_TS}.csv",
+    description="All SchemaTypes merged into one flat CSV, missing columns = null",
+)
+
+# ── OUTPUT 4: column-level stats report ──────────────────────────────────────
+data_only = unified_df[unified_cols]
+stats_df  = pd.DataFrame({
+    "column_name":  data_only.columns,
+    "non_null_count": data_only.count().values,
+    "null_count":   data_only.isnull().sum().values,
+    "null_pct":     (data_only.isnull().mean() * 100).round(2).values,
+    "unique_values": data_only.nunique().values,
+    "sample_value": [str(data_only[c].dropna().iloc[0])
+                     if data_only[c].dropna().shape[0] > 0 else ""
+                     for c in data_only.columns],
+})
+write_csv_to_s3(
+    stats_df,
+    f"column_stats_{RUN_TS}.csv",
+    description="Null %, unique count, and sample value for every unified column",
+)
+
+# ── OUTPUT 5: error log (if any) ─────────────────────────────────────────────
+if errors:
+    write_csv_to_s3(
+        pd.DataFrame(errors),
+        f"processing_errors_{RUN_TS}.csv",
+        description="Files that failed to process with error messages",
+    )
+
+print(f"\nDone. All CSVs written to s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}")
