@@ -1,0 +1,368 @@
+import sys
+import boto3
+import pyarrow as pa
+import pyarrow.parquet as pq
+from io import BytesIO
+from collections import defaultdict
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
+from datetime import datetime
+
+# ── init ──────────────────────────────────────────────────────────────────────
+args  = getResolvedOptions(sys.argv, ["JOB_NAME"])
+sc    = SparkContext()
+glue  = GlueContext(sc)
+spark = glue.spark_session
+job   = Job(glue)
+job.init(args["JOB_NAME"], args)
+
+BUCKET      = "pske-stg-maintenance"
+PREFIX      = "projects/ard-iot-data/ps.NA_PENSKE_TRIAL.measurements.results/"
+OUTPUT_PATH = "s3://pske-stg-maintenance/projects/ard-iot-data/reporting/"
+RUN_TS      = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+s3          = boto3.client("s3")
+
+# primary key columns — used for dedup and validation
+PK_COLS = ["vin", "timestamp"]   # adjust to exact column names in your data
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — find ALL parquet files grouped by SchemaType
+# ══════════════════════════════════════════════════════════════════════════════
+print("Step 1 — scanning all S3 files ...")
+
+# sample file  → schema discovery (PyArrow, fast)
+# all files    → full read (Spark, parallel)
+schema_samples  = {}   # one file per SchemaType for schema discovery
+all_s3_files    = defaultdict(list)   # all files per SchemaType
+
+paginator = s3.get_paginator("list_objects_v2")
+for page in paginator.paginate(Bucket=BUCKET, Prefix=PREFIX):
+    for obj in page.get("Contents", []):
+        key = obj["Key"]
+        if not key.endswith(".parquet"):
+            continue
+        schema_name = key.split("/")[-1].split("-")[0]
+        all_s3_files[schema_name].append(f"s3://{BUCKET}/{key}")
+        if schema_name not in schema_samples:
+            schema_samples[schema_name] = key
+
+total_schemas = len(schema_samples)
+print(f"  SchemaTypes  : {sorted(schema_samples.keys())}")
+print(f"  Total files  : {sum(len(v) for v in all_s3_files.values()):,}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — PyArrow schema discovery (driver only, zero Spark)
+#           collect every column + dtype per SchemaType
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nStep 2 — schema discovery via PyArrow ...")
+
+def flatten_pyarrow(schema, prefix=""):
+    cols = []
+    for field in schema:
+        path  = f"{prefix}.{field.name}" if prefix else field.name
+        dtype = field.type
+        if pa.types.is_struct(dtype):
+            cols.extend(flatten_pyarrow(dtype, prefix=path))
+        elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype):
+            elem = dtype.value_type
+            if pa.types.is_struct(elem):
+                cols.extend(flatten_pyarrow(elem, prefix=f"{path}[]"))
+            else:
+                cols.append((f"{path}[]", str(elem)))
+        elif pa.types.is_map(dtype):
+            cols.append((f"{path}[key]",   str(dtype.key_type)))
+            cols.append((f"{path}[value]", str(dtype.item_type)))
+        else:
+            cols.append((path, str(dtype)))
+    return cols
+
+# col_registry[col_name] = { schema_name: dtype_str }
+col_registry = defaultdict(dict)
+
+for schema_name, key in sorted(schema_samples.items()):
+    obj  = s3.get_object(Bucket=BUCKET, Key=key)
+    pf   = pq.ParquetFile(BytesIO(obj["Body"].read()))
+    cols = flatten_pyarrow(pf.schema_arrow)
+    for col_name, dtype_str in cols:
+        col_registry[col_name][schema_name] = dtype_str
+
+print(f"  Total unique columns across all schemas: {len(col_registry):,}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — build UNIFIED schema
+#           resolve type conflicts → most precise type
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nStep 3 — building unified schema ...")
+
+# type promotion order — higher index = more precise/safe
+TYPE_PRIORITY = {
+    "bool":    1,
+    "int8":    2,  "int16":   3,  "int32":   4,  "int64":   5,
+    "uint8":   2,  "uint16":  3,  "uint32":  4,  "uint64":  5,
+    "float":   6,  "float16": 6,  "float32": 7,  "float64": 8,
+    "double":  8,
+    "date32":  9,  "date64":  9,
+    "timestamp[ms]": 10, "timestamp[us]": 10, "timestamp[ns]": 10,
+    "string":  11, "utf8": 11, "large_utf8": 11,
+}
+
+def resolve_type(dtypes: list) -> str:
+    """Pick most precise type. Fall back to string if unknown conflict."""
+    unique = list(set(dtypes))
+    if len(unique) == 1:
+        return unique[0]
+    # score each type
+    scored = sorted(unique, key=lambda t: TYPE_PRIORITY.get(t.lower(), 99), reverse=True)
+    return scored[0]   # highest priority wins
+
+def unified_spark_type(dtype_str: str) -> T.DataType:
+    """Map PyArrow dtype string → Spark DataType for casting."""
+    d = dtype_str.lower()
+    if d in ("bool",):                              return T.BooleanType()
+    if d in ("int8","int16","int32","uint8","uint16"): return T.IntegerType()
+    if d in ("int64","uint32","uint64"):             return T.LongType()
+    if d in ("float","float16","float32"):           return T.FloatType()
+    if d in ("float64","double"):                    return T.DoubleType()
+    if "timestamp" in d:                            return T.TimestampType()
+    if d in ("date32","date64"):                    return T.DateType()
+    return T.StringType()   # default — safe for QuickSight
+
+# build unified column list: col_name → unified_dtype
+unified_schema = {}
+schema_map_report = []   # for CSV output
+
+for col_name, schema_dtypes in sorted(col_registry.items()):
+    all_dtypes    = list(schema_dtypes.values())
+    unified_dtype = resolve_type(all_dtypes)
+    has_conflict  = len(set(all_dtypes)) > 1
+    present_in    = sorted(schema_dtypes.keys())
+
+    unified_schema[col_name] = unified_dtype
+
+    schema_map_report.append((
+        col_name,
+        unified_dtype,
+        " | ".join(sorted(set(all_dtypes))),
+        ", ".join(present_in),
+        len(present_in),
+        len(present_in) == total_schemas,   # is_common — in every schema
+        str(has_conflict),
+    ))
+
+print(f"  Unified schema columns: {len(unified_schema):,}")
+
+# write unified schema mapping CSV
+schema_map_df = spark.createDataFrame(
+    schema_map_report,
+    ["column_name", "unified_dtype", "raw_dtypes",
+     "present_in_schemas", "schema_count", "is_common", "has_type_conflict"]
+)
+(schema_map_df
+ .orderBy(F.desc("schema_count"), "column_name")
+ .coalesce(1).write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}csv-outputs/unified_schema_map_{RUN_TS}/"))
+print(f"  Unified schema map → {OUTPUT_PATH}csv-outputs/unified_schema_map_{RUN_TS}/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Spark flatten + cast helper
+# ══════════════════════════════════════════════════════════════════════════════
+def get_flat_cast_cols(schema, unified_schema, prefix=""):
+    """
+    Flatten nested schema AND cast each column to its unified type.
+    Columns not in unified_schema are cast to StringType as fallback.
+    """
+    exprs = []
+    for field in schema.fields:
+        path    = f"{prefix}.{field.name}" if prefix else field.name
+        parts   = path.split(".")
+        col_ref = F.col(".".join(f"`{p}`" for p in parts))
+        dtype   = field.dataType
+
+        if isinstance(dtype, T.StructType):
+            exprs.extend(get_flat_cast_cols(dtype, unified_schema, prefix=path))
+        elif isinstance(dtype, (T.ArrayType, T.MapType)):
+            exprs.append(col_ref.cast("string").alias(path))
+        else:
+            target_type = unified_spark_type(
+                unified_schema.get(path, "string")
+            )
+            exprs.append(col_ref.cast(target_type).alias(path))
+    return exprs
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 5 — read ALL files per SchemaType, flatten, cast, align to unified schema
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nStep 5 — reading all files, applying unified schema ...")
+
+all_unified_cols = list(unified_schema.keys())
+all_dfs          = []
+
+for schema_name, file_list in sorted(all_s3_files.items()):
+    print(f"  Reading {schema_name} ({len(file_list):,} files) ...")
+
+    # read all files for this SchemaType at once — Spark parallelises
+    raw_df  = spark.read.parquet(*file_list)
+
+    # flatten + cast to unified types
+    flat_exprs = get_flat_cast_cols(raw_df.schema, unified_schema)
+    flat_df    = raw_df.select(flat_exprs)
+
+    # add columns missing in this SchemaType as null
+    for col in all_unified_cols:
+        if col not in flat_df.columns:
+            target_type = unified_spark_type(unified_schema[col])
+            flat_df = flat_df.withColumn(col, F.lit(None).cast(target_type))
+
+    # add source tag
+    flat_df = flat_df.withColumn("_schema_type", F.lit(schema_name)) \
+                     .withColumn("_source_date",
+                         F.regexp_extract(F.input_file_name(), r"/(\d{8})/", 1))
+
+    all_dfs.append(flat_df.select(all_unified_cols + ["_schema_type", "_source_date"]))
+
+# union all SchemaTypes
+print("  Merging all SchemaTypes ...")
+merged_df = all_dfs[0]
+for df in all_dfs[1:]:
+    merged_df = merged_df.unionByName(df, allowMissingColumns=True)
+
+merged_df.cache()
+total_raw = merged_df.count()
+print(f"  Total rows before dedup/validation: {total_raw:,}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 6 — data validation
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nStep 6 — data validation ...")
+
+# find actual PK columns present in data
+pk_cols_present = [c for c in PK_COLS if c in merged_df.columns]
+print(f"  Primary key columns found: {pk_cols_present}")
+
+validation_report = []
+
+# CHECK 1 — null primary keys
+if pk_cols_present:
+    pk_null_filter = " OR ".join([f"`{c}` IS NULL" for c in pk_cols_present])
+    null_pk_count  = merged_df.filter(pk_null_filter).count()
+    validation_report.append(("NULL primary key rows",    str(null_pk_count), null_pk_count > 0))
+    print(f"  Null PK rows     : {null_pk_count:,}")
+
+# CHECK 2 — duplicate primary keys
+if pk_cols_present:
+    dup_count = (merged_df
+                 .groupBy(pk_cols_present)
+                 .count()
+                 .filter(F.col("count") > 1)
+                 .count())
+    validation_report.append(("Duplicate PK rows", str(dup_count), dup_count > 0))
+    print(f"  Duplicate PK rows: {dup_count:,}")
+
+# CHECK 3 — null fill rate per column (top 10 worst)
+fill_exprs  = [
+    (F.sum(F.when(F.col(f"`{c}`").isNull(), 1).otherwise(0)) / F.count("*") * 100)
+     .alias(c)
+    for c in all_unified_cols
+]
+fill_result = merged_df.agg(*fill_exprs).collect()[0]
+col_fill_rates = {c: round(fill_result[c] or 0.0, 2) for c in all_unified_cols}
+
+# flag columns with >80% nulls
+high_null_cols = [(c, v) for c, v in col_fill_rates.items() if v > 80.0]
+validation_report.append((
+    "Columns >80% null",
+    str(len(high_null_cols)),
+    len(high_null_cols) > 0
+))
+print(f"  Columns >80% null: {len(high_null_cols):,} — {[c for c,_ in high_null_cols[:5]]}")
+
+# CHECK 4 — timestamp range sanity (no future dates, no dates before 2000)
+ts_cols = [c for c, t in unified_schema.items()
+           if "timestamp" in t.lower() and c in merged_df.columns]
+for ts_col in ts_cols:
+    bad_ts = merged_df.filter(
+        (F.col(f"`{ts_col}`") < "2000-01-01") |
+        (F.col(f"`{ts_col}`") > F.current_timestamp())
+    ).count()
+    validation_report.append((
+        f"Invalid timestamp in {ts_col}", str(bad_ts), bad_ts > 0
+    ))
+    if bad_ts > 0:
+        print(f"  Bad timestamps in {ts_col}: {bad_ts:,}")
+
+# write validation report
+val_df = spark.createDataFrame(
+    validation_report, ["check", "count", "has_issue"]
+)
+(val_df.coalesce(1).write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}csv-outputs/validation_report_{RUN_TS}/"))
+print(f"  Validation report → {OUTPUT_PATH}csv-outputs/validation_report_{RUN_TS}/")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 7 — clean: remove bad rows, deduplicate
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nStep 7 — cleaning data ...")
+
+clean_df = merged_df
+
+# remove rows with null primary keys
+if pk_cols_present:
+    for pk in pk_cols_present:
+        clean_df = clean_df.filter(F.col(f"`{pk}`").isNotNull())
+
+# remove rows with invalid timestamps
+for ts_col in ts_cols:
+    clean_df = clean_df.filter(
+        F.col(f"`{ts_col}`").isNotNull() &
+        (F.col(f"`{ts_col}`") >= "2000-01-01") &
+        (F.col(f"`{ts_col}`") <= F.current_timestamp())
+    )
+
+# deduplicate — on PK columns if available, else all columns
+dedup_keys = pk_cols_present if pk_cols_present else all_unified_cols
+clean_df   = clean_df.dropDuplicates(dedup_keys)
+
+total_clean = clean_df.count()
+removed     = total_raw - total_clean
+print(f"  Raw rows   : {total_raw:,}")
+print(f"  Clean rows : {total_clean:,}")
+print(f"  Removed    : {removed:,}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 8 — write QuickSight-ready Parquet + CSV
+# ══════════════════════════════════════════════════════════════════════════════
+print("\nStep 8 — writing QuickSight-ready outputs ...")
+
+# Parquet — best for QuickSight SPICE (fast, compressed, typed)
+(clean_df
+ .write.mode("overwrite")
+ .partitionBy("_source_date", "_schema_type")
+ .parquet(f"{OUTPUT_PATH}quicksight/unified_vehicle_data_{RUN_TS}/"))
+print(f"  Parquet (QuickSight SPICE) → {OUTPUT_PATH}quicksight/unified_vehicle_data_{RUN_TS}/")
+
+# CSV — backup / manual inspection
+(clean_df
+ .coalesce(1)
+ .write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}csv-outputs/unified_vehicle_data_{RUN_TS}/"))
+print(f"  CSV → {OUTPUT_PATH}csv-outputs/unified_vehicle_data_{RUN_TS}/")
+
+# column fill rate report — useful for QuickSight dataset config
+fill_rows = [(c, col_fill_rates.get(c, 0.0), unified_schema[c]) for c in all_unified_cols]
+fill_df   = spark.createDataFrame(fill_rows, ["column_name", "null_pct", "data_type"])
+(fill_df
+ .orderBy("null_pct")
+ .coalesce(1).write.mode("overwrite")
+ .option("header", "true")
+ .csv(f"{OUTPUT_PATH}csv-outputs/column_fill_rates_{RUN_TS}/"))
+print(f"  Fill rates → {OUTPUT_PATH}csv-outputs/column_fill_rates_{RUN_TS}/")
+
+print("\nDONE")
+job.commit()
