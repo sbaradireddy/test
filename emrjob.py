@@ -65,3 +65,25 @@ print(f"Writing to: {DST}")
 
 print("Compaction complete.")
 spark.stop()
+
+
+
+
+
+aws emr-serverless start-job-run \
+  --application-id <YOUR_APP_ID> \
+  --execution-role-arn arn:aws:iam::9764-3258-7531:role/<YOUR_EMR_SERVERLESS_ROLE> \
+  --name "compact-penske-iot" \
+  --job-driver '{
+    "sparkSubmit": {
+      "entryPoint": "s3://pske-stg-maintenance/scripts/compact_iot_parquet.py",
+      "sparkSubmitParameters": "--conf spark.executor.cores=4 --conf spark.executor.memory=16g --conf spark.driver.cores=2 --conf spark.driver.memory=8g --conf spark.executor.instances=20"
+    }
+  }' \
+  --configuration-overrides '{
+    "monitoringConfiguration": {
+      "s3MonitoringConfiguration": {
+        "logUri": "s3://pske-stg-maintenance/emr-serverless-logs/"
+      }
+    }
+  }'
