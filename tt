@@ -1,0 +1,44 @@
+%glue_version 4.0
+%worker_type G.2X
+%number_of_workers 20
+%idle_timeout 60
+%%configure
+{
+  "--conf": "spark.driver.maxResultSize=4g --conf spark.sql.parquet.mergeSchema=false --conf spark.sql.parquet.respectSummaryFiles=false --conf spark.hadoop.parquet.enable.summary-metadata=false"
+}
+
+
+
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
+
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+SRC = "s3://pske-stg-maintenance/projects/ard-iot-data/ps.NA_PENSKE_TRIAL.measurements.results/"
+DST = "s3://pske-stg-maintenance/projects/ard-iot-data-compacted/"
+
+df = (spark.read
+      .option("mergeSchema", "false")          # <-- forced off here
+      .option("recursiveFileLookup", "true")
+      .parquet(SRC))
+
+print("Schema read OK. Columns:", len(df.columns))
+
+
+total = df.count()
+n_files = max(1, total // 2_000_000)
+print(f"rows={total:,}  files={n_files}")
+
+(df.repartition(n_files)
+   .write.mode("overwrite")
+   .option("compression", "snappy")
+   .parquet(DST))
+print("Done ->", DST)
+
+
+
+print(spark.conf.get("spark.sql.parquet.mergeSchema"))
+print(spark.conf.get("spark.driver.maxResultSize"))
+
