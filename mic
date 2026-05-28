@@ -1,0 +1,19 @@
+# --- Config ---
+S3_PATH = "s3://pske-stg-maintenance/projects/ard-iot-data/ps.NA_PENSKE_TRIAL.measurements.results/20260521/020000/"
+COLUMN  = "metadata_measurementconfigurationname"
+TARGET  = "Penske_FL_ExtendedTesting_Measurement_SensorSignals"
+
+# Read all parquet files under the prefix.
+# mergeSchema=True is important here because your folder has multiple schema
+# types (SchemaType1, SchemaType10, ...) that may not share the same columns.
+df = (
+    spark.read
+    .option("mergeSchema", "true")
+    .parquet(S3_PATH)
+)
+
+# Keep ONLY the column you want, then filter to the highlighted value.
+result = df.select(col(COLUMN)).filter(col(COLUMN) == TARGET)
+
+result.show(50, truncate=False)
+print("Matching rows:", result.count())
