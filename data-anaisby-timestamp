@@ -1,3 +1,41 @@
+# %% CELL 4 — Read Parquet + parse timestamp  (cast-based, Spark 3.3 safe)
+df = spark.read.parquet(SRC_PARQUET)
+
+ORIGINAL_COLS = df.columns                          # capture all source columns BEFORE adding helpers
+print("Raw rows   :", df.count())
+print("Columns    :", len(ORIGINAL_COLS))
+
+dt = df.schema[TS_COL].dataType
+ts = F.col(TS_COL)
+if isinstance(dt, TimestampType):
+    ts_expr = ts
+elif isinstance(dt, NumericType):
+    # epoch ms (> ~1e12) -> divide by 1000; else treat as epoch seconds. Cast to timestamp.
+    ts_expr = (F.when(ts > F.lit(1_000_000_000_000), (ts / F.lit(1000)).cast("timestamp"))
+                .otherwise(ts.cast("timestamp")))
+else:  # string: try ISO first, then epoch-ms-as-text, then epoch-s-as-text
+    as_long = ts.cast("long")
+    ts_expr = F.coalesce(
+        F.to_timestamp(ts),                                   # ISO-8601 e.g. 2026-05-28T16:55:03Z
+        F.when(as_long > F.lit(1_000_000_000_000), (as_long / F.lit(1000)).cast("timestamp")),
+        as_long.cast("timestamp"),                            # epoch seconds as text
+    )
+
+df = df.withColumn("_event_ts", ts_expr)
+
+bad = df.filter(F.col("_event_ts").isNull()).count()
+print("Unparseable timestamps:", bad, "(these rows get null window_start)")
+
+
+
+
+
+
+
+
+
+
+
 # =============================================================================
 # AWS Glue Notebook — Per-VIN time-window TAGGING  (NO aggregation)
 # Source : Parquet on S3   ->   Output : CSV on S3
