@@ -1,68 +1,114 @@
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from pyspark.sql import functions as F
-from pyspark.sql.functions import col, count, to_timestamp, window, date_trunc, lit
+"""
+Vehicle sensor data analysis (PySpark / AWS Glue) - WITH DIAGNOSTICS
+--------------------------------------------------------------------
+Aggregates ALL columns PER TRUCK (per VIN) at 1min / 15min / 1hour / 1day.
+This version PRINTS results and counts at every step so you can see output
+in the notebook, then writes each resolution to its own S3 prefix.
 
-# ---------------- CONFIG (edit these) ----------------
-SRC_PATH       = "s3://your-bucket/source-parquet/"   # parquet source
-DST_PATH       = "s3://your-bucket/output-csv/"        # csv output root
-VIN_COL        = "vin"
-VEHICLE_ID_COL = "vehicle_id"
-TS_COL         = "timestamp"                            # your timestamp column
-# -----------------------------------------------------
+Run it cell-by-cell, or all at once. Watch the printed counts:
+  - if "raw rows" is 0  -> INPUT_PATH is wrong / empty
+  - if "rows with valid ts" is 0 -> timestamp didn't parse (fix TS_COL / epoch unit)
+"""
 
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+from pyspark.sql import SparkSession, functions as F
 
-# 1) Read parquet + discover ALL columns
-df = spark.read.parquet(SRC_PATH)
-all_cols = df.columns
-print("Total columns:", len(all_cols))
-print("Columns:", all_cols)
-df.printSchema()
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+INPUT_PATH  = "s3://your-bucket/sensor-data/"
+OUTPUT_BASE = "s3://your-bucket/analysis-output/"
 
-# ensure timestamp is a real timestamp type
-df = df.withColumn(TS_COL, to_timestamp(col(TS_COL)))
+VIN_COL = "metaData_vin"
+ID_COL  = "metaData_vehicleId"
+TS_COL  = "metaData_start"      # the real time column
+TS_EPOCH_UNIT = "s"             # if TS_COL is a number: "s" seconds, "ms" milliseconds
 
-# sensor columns = everything except the keys + timestamp
-key_cols    = [VIN_COL, VEHICLE_ID_COL, TS_COL]
-sensor_cols = [c for c in all_cols if c not in key_cols]
+BUCKETS = {
+    "1min":  "1 minute",
+    "15min": "15 minutes",
+    "1hour": "1 hour",
+    "1day":  "1 day",
+}
 
-# count("col") counts NON-NULL values -> tells you data availability per sensor
-sensor_aggs = [count(col(c)).alias(c + "_count") for c in sensor_cols]
+NUMERIC_TYPES = ("tinyint", "smallint", "int", "bigint", "float", "double", "decimal")
 
-# ---------- LOGIC 1: group by VIN + VEHICLE_ID (all columns) ----------
-logic1 = (df.groupBy(VIN_COL, VEHICLE_ID_COL)
-            .agg(count("*").alias("record_count"), *sensor_aggs))
+spark = SparkSession.builder.appName("vin-vehicle-aggregate").getOrCreate()
 
-# ---------- LOGIC 2: per-VIN data volume per time window ----------
-def bucketed(frame, label, window_dur=None, trunc_fmt=None):
-    if trunc_fmt:                                   # for 1 day
-        b = frame.withColumn("bucket", date_trunc(trunc_fmt, col(TS_COL)))
-    else:                                           # for 1 min / 15 min
-        b = frame.withColumn("bucket", window(col(TS_COL), window_dur).start)
-    return (b.groupBy(VIN_COL, "bucket")
-             .agg(count("*").alias("record_count"), *sensor_aggs)
-             .withColumn("granularity", lit(label))
-             .orderBy(VIN_COL, "bucket"))
 
-per_1min  = bucketed(df, "1min",  window_dur="1 minute")
-per_15min = bucketed(df, "15min", window_dur="15 minutes")
-per_1day  = bucketed(df, "1day",  trunc_fmt="day")
+# --------------------------------------------------------------------------- #
+def parse_timestamp(df):
+    ts_type = dict(df.dtypes)[TS_COL]
+    print(f">> {TS_COL} stored as: {ts_type}")
+    if ts_type == "timestamp":
+        return df
+    if ts_type.startswith(NUMERIC_TYPES):
+        col = F.col(TS_COL)
+        if TS_EPOCH_UNIT == "ms":
+            col = col / 1000
+        return df.withColumn(TS_COL, F.to_timestamp(F.from_unixtime(col)))
+    return df.withColumn(TS_COL, F.to_timestamp(F.col(TS_COL)))
 
-# quick peek
-per_1min.show(20, truncate=False)
 
-# ---------- WRITE TO S3 AS CSV ----------
-def write_csv(frame, sub):
-    (frame.coalesce(1)                              # 1 file per output; drop for large data
-          .write.mode("overwrite").option("header", "true")
-          .csv(DST_PATH + sub))
+def build_agg_exprs(df):
+    keys = {VIN_COL, ID_COL, TS_COL}
+    exprs = []
+    for name, dtype in df.dtypes:
+        if name in keys:
+            continue
+        if dtype.startswith(NUMERIC_TYPES):
+            exprs += [
+                F.avg(name).alias(f"{name}_avg"),
+                F.min(name).alias(f"{name}_min"),
+                F.max(name).alias(f"{name}_max"),
+                F.last(name, ignorenulls=True).alias(f"{name}_last"),
+            ]
+        else:
+            exprs.append(F.last(name, ignorenulls=True).alias(name))
+    exprs.append(F.count(F.lit(1)).alias("record_count"))
+    return exprs
 
-write_csv(logic1,    "logic1_groupby_vin_vehicle/")
-write_csv(per_1min,  "per_vin_1min/")
-write_csv(per_15min, "per_vin_15min/")
-write_csv(per_1day,  "per_vin_1day/")
 
-print("Done. Outputs written under:", DST_PATH)
+def aggregate_per_truck(df, window_size, agg_exprs):
+    return (
+        df.groupBy(
+            F.col(VIN_COL),
+            F.col(ID_COL),
+            F.window(F.col(TS_COL), window_size).alias("w"),
+        )
+        .agg(*agg_exprs)
+        .withColumn("bucket_start", F.col("w.start"))
+        .withColumn("bucket_end",   F.col("w.end"))
+        .drop("w")
+        .orderBy(VIN_COL, ID_COL, "bucket_start")
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 1) READ + verify
+# --------------------------------------------------------------------------- #
+src = spark.read.parquet(INPUT_PATH)
+print(">> raw rows:", src.count())
+print(">> columns:", src.columns)
+src.show(5, truncate=False)
+
+assert TS_COL in src.columns, f"{TS_COL} not found. Columns: {src.columns}"
+
+# 2) PARSE timestamp + verify it worked
+src = parse_timestamp(src)
+valid = src.filter(F.col(TS_COL).isNotNull()).count()
+print(f">> rows with valid timestamp: {valid} (of {src.count()})")
+src.select(TS_COL).show(5, truncate=False)   # confirm real dates, not nulls / 1970
+
+# 3) AGGREGATE + SHOW + WRITE per resolution
+agg_exprs = build_agg_exprs(src)
+for label, window_size in BUCKETS.items():
+    result = aggregate_per_truck(src, window_size, agg_exprs)
+    n = result.count()
+    print(f"\n===== {label}: {n} rows =====")
+    result.show(20, truncate=False)          # <-- this is what prints results
+
+    out = OUTPUT_BASE.rstrip("/") + "/" + label + "/"
+    result.write.mode("overwrite").partitionBy(VIN_COL).parquet(out)
+    print(f">> written -> {out}")
+
+print("\nDone.")
