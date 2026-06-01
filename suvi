@@ -1,0 +1,68 @@
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, count, to_timestamp, window, date_trunc, lit
+
+# ---------------- CONFIG (edit these) ----------------
+SRC_PATH       = "s3://your-bucket/source-parquet/"   # parquet source
+DST_PATH       = "s3://your-bucket/output-csv/"        # csv output root
+VIN_COL        = "vin"
+VEHICLE_ID_COL = "vehicle_id"
+TS_COL         = "timestamp"                            # your timestamp column
+# -----------------------------------------------------
+
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+# 1) Read parquet + discover ALL columns
+df = spark.read.parquet(SRC_PATH)
+all_cols = df.columns
+print("Total columns:", len(all_cols))
+print("Columns:", all_cols)
+df.printSchema()
+
+# ensure timestamp is a real timestamp type
+df = df.withColumn(TS_COL, to_timestamp(col(TS_COL)))
+
+# sensor columns = everything except the keys + timestamp
+key_cols    = [VIN_COL, VEHICLE_ID_COL, TS_COL]
+sensor_cols = [c for c in all_cols if c not in key_cols]
+
+# count("col") counts NON-NULL values -> tells you data availability per sensor
+sensor_aggs = [count(col(c)).alias(c + "_count") for c in sensor_cols]
+
+# ---------- LOGIC 1: group by VIN + VEHICLE_ID (all columns) ----------
+logic1 = (df.groupBy(VIN_COL, VEHICLE_ID_COL)
+            .agg(count("*").alias("record_count"), *sensor_aggs))
+
+# ---------- LOGIC 2: per-VIN data volume per time window ----------
+def bucketed(frame, label, window_dur=None, trunc_fmt=None):
+    if trunc_fmt:                                   # for 1 day
+        b = frame.withColumn("bucket", date_trunc(trunc_fmt, col(TS_COL)))
+    else:                                           # for 1 min / 15 min
+        b = frame.withColumn("bucket", window(col(TS_COL), window_dur).start)
+    return (b.groupBy(VIN_COL, "bucket")
+             .agg(count("*").alias("record_count"), *sensor_aggs)
+             .withColumn("granularity", lit(label))
+             .orderBy(VIN_COL, "bucket"))
+
+per_1min  = bucketed(df, "1min",  window_dur="1 minute")
+per_15min = bucketed(df, "15min", window_dur="15 minutes")
+per_1day  = bucketed(df, "1day",  trunc_fmt="day")
+
+# quick peek
+per_1min.show(20, truncate=False)
+
+# ---------- WRITE TO S3 AS CSV ----------
+def write_csv(frame, sub):
+    (frame.coalesce(1)                              # 1 file per output; drop for large data
+          .write.mode("overwrite").option("header", "true")
+          .csv(DST_PATH + sub))
+
+write_csv(logic1,    "logic1_groupby_vin_vehicle/")
+write_csv(per_1min,  "per_vin_1min/")
+write_csv(per_15min, "per_vin_15min/")
+write_csv(per_1day,  "per_vin_1day/")
+
+print("Done. Outputs written under:", DST_PATH)
