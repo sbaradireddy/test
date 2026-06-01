@@ -1,0 +1,123 @@
+"""
+Vehicle sensor data analysis (PySpark) - SELECT ALL, no aggregation
+-------------------------------------------------------------------
+Reads parquet from S3, keeps EVERY column and EVERY row (no avg/min/max),
+just tags each row with a time bucket and groups/orders by VIN + vehicleId.
+
+Runs every requirement separately and writes CSV to its own S3 prefix:
+    day_15min   : last 1 day  of data, 15-minute bucket
+    hour_15min  : last 1 hour of data, 15-minute bucket
+    hour_1min   : last 1 hour of data, 1-minute  bucket
+    all_1min / all_15min / all_1hour / all_1day : whole dataset at each bucket
+
+NEW IDENTIFICATION COLUMNS (the "orange" columns - added only to label rows,
+they are NOT part of the source data):
+    id_analysis        -> which requirement produced the row
+    id_bucket_size     -> the time bucket used (e.g. "15 minutes")
+    id_bucket_start    -> start timestamp of the bucket this row falls in
+    id_vin             -> copy of metaData_vin   (used to split files per truck)
+    id_vehicleId       -> copy of metaData_vehicleId
+
+Run on AWS Glue / EMR / standalone Spark:
+    spark-submit vin_vehicle_aggregate.py
+"""
+
+from datetime import timedelta
+from pyspark.sql import SparkSession, functions as F
+
+# --------------------------------------------------------------------------- #
+# Config - edit these
+# --------------------------------------------------------------------------- #
+INPUT_PATH  = "s3://your-bucket/sensor-data/"        # source parquet
+OUTPUT_BASE = "s3://your-bucket/analysis-output/"    # results root (CSV)
+
+VIN_COL = "metaData_vin"
+ID_COL  = "metaData_vehicleId"
+TS_COL  = "window_start"     # timestamp used for bucketing (or first_reading_ts)
+
+# bucket label -> size in seconds
+BUCKET_SECONDS = {
+    "1 minute":   60,
+    "15 minutes": 900,
+    "1 hour":     3600,
+    "1 day":      86400,
+}
+
+# scope label -> lookback in seconds (None = use the whole dataset)
+SCOPE_SECONDS = {
+    "1 day":  86400,
+    "1 hour": 3600,
+    None:     None,
+}
+
+# requirement name -> (data scope, bucket size)  ==  the picture's requirements
+REQUIREMENTS = {
+    "day_15min":  ("1 day",  "15 minutes"),   # 1 day data,  15 min per truck
+    "hour_15min": ("1 hour", "15 minutes"),   # 1 hour data, 15 min per truck
+    "hour_1min":  ("1 hour", "1 minute"),     # 1 hour data, 1 min  per truck
+    "all_1min":   (None,     "1 minute"),
+    "all_15min":  (None,     "15 minutes"),
+    "all_1hour":  (None,     "1 hour"),
+    "all_1day":   (None,     "1 day"),
+}
+
+spark = (
+    SparkSession.builder
+    .appName("vin-vehicle-select-all")
+    .getOrCreate()
+)
+
+
+# --------------------------------------------------------------------------- #
+def add_identification_columns(df, name, bucket):
+    """Keep all columns + add the orange identification columns. No aggregation."""
+    sec = BUCKET_SECONDS[bucket]
+    bucket_start = (F.floor(F.unix_timestamp(F.col(TS_COL)) / sec) * sec).cast("timestamp")
+
+    return (
+        df.withColumn("id_analysis",     F.lit(name))
+          .withColumn("id_bucket_size",  F.lit(bucket))
+          .withColumn("id_bucket_start", bucket_start)
+          .withColumn("id_vin",          F.col(VIN_COL))
+          .withColumn("id_vehicleId",    F.col(ID_COL))
+    )
+
+
+def apply_scope(df, scope, max_ts):
+    """Filter the source down to the requested lookback window."""
+    secs = SCOPE_SECONDS[scope]
+    if secs is None or max_ts is None:
+        return df
+    cutoff = max_ts - timedelta(seconds=secs)
+    return df.filter(F.col(TS_COL) >= F.lit(cutoff))
+
+
+def write_csv(df, name):
+    out = OUTPUT_BASE.rstrip("/") + "/" + name + "/"
+    (
+        df.orderBy("id_vin", "id_vehicleId", "id_bucket_start", TS_COL)
+          .write.mode("overwrite")
+          .option("header", True)
+          .partitionBy("id_vin")          # one folder per truck
+          .csv(out)
+    )
+    print(f"[done] {name} -> {out}")
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    src = spark.read.parquet(INPUT_PATH)
+    src = src.withColumn(TS_COL, F.col(TS_COL).cast("timestamp"))
+
+    max_ts = src.agg(F.max(TS_COL)).first()[0]   # newest timestamp in the data
+
+    for name, (scope, bucket) in REQUIREMENTS.items():
+        df = apply_scope(src, scope, max_ts)
+        df = add_identification_columns(df, name, bucket)
+        write_csv(df, name)
+
+    spark.stop()
+
+
+if __name__ == "__main__":
+    main()
