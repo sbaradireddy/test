@@ -1,0 +1,7 @@
+# Add to your existing requirements.txt to enable audio/image/video parsing
+faster-whisper>=1.0.0     # local audio transcription (audio_parser.py, video_parser.py)
+boto3>=1.34.0             # already used by pii_processor.py - Rekognition/Bedrock clients
+Pillow>=10.0.0            # image metadata (media_metadata.py)
+
+# System-level (not pip-installable) - must be present on the container/image:
+#   ffmpeg / ffprobe  -> apt-get install -y ffmpeg
