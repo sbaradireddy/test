@@ -1,44 +1,13 @@
 (venv) PS C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework> python main.py run --config C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\configs\dev.yaml
-2026-08-07 10:37:45,119 [INFO] botocore.credentials: Found credentials in shared credentials file: ~/.aws/credentials
-2026-08-07 10:37:45,943 [INFO] custom_rag_pipeline_framework.core.orchestrator: Starting pipeline run=0d97aa34-eccf-4f45-a900-541bd632f39b strategy=full_history target=s3_vectors
-2026-08-07 10:37:46,419 [INFO] custom_rag_pipeline_framework.core.orchestrator: Found 6 files in s3://pske-bde-test-gbbucket/source_files/
-2026-08-07 10:37:46,419 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3
-2026-08-07 10:38:08,370 [WARNING] custom_rag_pipeline_framework.processing.parsers.audio_parser: Bedrock audio transcription failed for source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3: An error occurred (ValidationException) when calling the Converse operation: ContentBlock object at messages.0.content.0 must set one of the following keys: text, image, toolUse, toolResult, document, video, cachePoint, reasoningContent, citationsContent, searchResult.
-2026-08-07 10:38:08,373 [ERROR] custom_rag_pipeline_framework.core.orchestrator: Failed to process source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3: Failed to parse: source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3
-2026-08-07 10:38:08,374 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/images/0000035497.png
-2026-08-07 10:38:09,683 [WARNING] custom_rag_pipeline_framework.processing.parsers.image_parser: Rekognition label detection failed: An error occurred (AccessDeniedException) when calling the DetectLabels operation: User: arn:aws:sts::498618929942:assumed-role/AWSReservedSSO_EnterpriseAI_Agentic_User_89f01c0f14036084/505084739 is not authorized to perform: rekognition:DetectLabels because no identity-based policy allows the rekognition:DetectLabels action
-2026-08-07 10:38:10,312 [WARNING] custom_rag_pipeline_framework.processing.parsers.image_parser: Rekognition text detection failed: An error occurred (AccessDeniedException) when calling the DetectText operation: User: arn:aws:sts::498618929942:assumed-role/AWSReservedSSO_EnterpriseAI_Agentic_User_89f01c0f14036084/505084739 is not authorized to perform: rekognition:DetectText because no identity-based policy allows the rekognition:DetectText action
-2026-08-07 10:38:10,313 [INFO] custom_rag_pipeline_framework.processing.parsers.image_parser: No content extracted from image source_files/images/0000035497.png
-2026-08-07 10:38:10,314 [ERROR] custom_rag_pipeline_framework.core.orchestrator: Failed to process source_files/images/0000035497.png: Failed to parse: source_files/images/0000035497.png
-2026-08-07 10:38:10,314 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/pdf/allison_operator-manual_040-om8688en-202205-linked-secured_2022_b7f2785c.pdf
-2026-08-07 10:38:10,977 [INFO] custom_rag_pipeline_framework.processing.validators.quality_validator: Validated: source_files/pdf/allison_operator-manual_040-om8688en-202205-linked-secured_2022_b7f2785c.pdf (50277 chars)
-2026-08-07 10:38:10,991 [INFO] custom_rag_pipeline_framework.processing.privacy.pii_processor: Redacted 2 PII entities
-2026-08-07 10:38:10,994 [INFO] custom_rag_pipeline_framework.processing.metadata.tagger: Tagged 116 chunks for source_files/pdf/allison_operator-manual_040-om8688en-202205-linked-secured_2022_b7f2785c.pdf
-2026-08-07 10:38:31,568 [INFO] custom_rag_pipeline_framework.connectors.targets.s3_vectors_target: Put 116 vectors into s3vectors://pske-bde-test-bucket
-2026-08-07 10:38:31,947 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/pdf/allison_operator-manual_041-om9144en-202408-linked-secured_2024_en_736c02d2.pdf
-2026-08-07 10:38:35,235 [INFO] custom_rag_pipeline_framework.processing.validators.quality_validator: Validated: source_files/pdf/allison_operator-manual_041-om9144en-202408-linked-secured_2024_en_736c02d2.pdf (45283 chars)
-2026-08-07 10:38:35,246 [INFO] custom_rag_pipeline_framework.processing.privacy.pii_processor: Redacted 21 PII entities
-2026-08-07 10:38:35,248 [INFO] custom_rag_pipeline_framework.processing.metadata.tagger: Tagged 110 chunks for source_files/pdf/allison_operator-manual_041-om9144en-202408-linked-secured_2024_en_736c02d2.pdf
-2026-08-07 10:38:53,895 [INFO] custom_rag_pipeline_framework.connectors.targets.s3_vectors_target: Put 110 vectors into s3vectors://pske-bde-test-bucket
-2026-08-07 10:38:54,302 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/pdf/allison_operator-manual_042-om9026en-202307-linked-secured_2025_en_15d06047.pdf
-2026-08-07 10:38:58,012 [INFO] custom_rag_pipeline_framework.processing.validators.quality_validator: Validated: source_files/pdf/allison_operator-manual_042-om9026en-202307-linked-secured_2025_en_15d06047.pdf (110633 chars)
-2026-08-07 10:38:58,042 [INFO] custom_rag_pipeline_framework.processing.privacy.pii_processor: Redacted 6 PII entities
-2026-08-07 10:38:58,048 [INFO] custom_rag_pipeline_framework.processing.metadata.tagger: Tagged 253 chunks for source_files/pdf/allison_operator-manual_042-om9026en-202307-linked-secured_2025_en_15d06047.pdf
-2026-08-07 10:39:41,999 [INFO] custom_rag_pipeline_framework.connectors.targets.s3_vectors_target: Put 253 vectors into s3vectors://pske-bde-test-bucket
-2026-08-07 10:39:42,397 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
-2026-08-07 10:39:47,620 [WARNING] custom_rag_pipeline_framework.processing.parsers.video_parser: ffmpeg audio extraction failed: [WinError 2] The system cannot find the file specified
-2026-08-07 10:39:47,621 [INFO] custom_rag_pipeline_framework.processing.parsers.video_parser: No audio track extracted from source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
-2026-08-07 10:39:47,634 [WARNING] custom_rag_pipeline_framework.processing.parsers.video_parser: ffmpeg frame extraction failed: [WinError 2] The system cannot find the file specified
-2026-08-07 10:39:47,641 [INFO] custom_rag_pipeline_framework.processing.parsers.video_parser: No content extracted from video source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
-2026-08-07 10:39:47,641 [ERROR] custom_rag_pipeline_framework.core.orchestrator: Failed to process source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4: Failed to parse: source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
-2026-08-07 10:39:47,645 [INFO] rag_pipeline.metrics: {"_aws": {"Timestamp": 1786113587645, "CloudWatchMetrics": [{"Namespace": "RAGDataPipeline", "Dimensions": [["pipeline"]], "Metrics": [{"Name": "FilesProcessed", "Unit": "Count"}, {"Name": "FilesSkipped", "Unit": "Count"}, {"Name": "FilesFailed", "Unit": "Count"}, {"Name": "RunDurationSeconds", "Unit": "Seconds"}]}]}, "pipeline": "custom_rag", "FilesProcessed": 3, "FilesSkipped": 0, "FilesFailed": 3, "RunDurationSeconds": 121.70162224769592}
-2026-08-07 10:39:48,125 [INFO] rag_pipeline.audit: Audit trail written to s3://pske-bde-test-gbbucket/pipeline_audit/0d97aa34-eccf-4f45-a900-541bd632f39b.json
-2026-08-07 10:39:48,128 [INFO] custom_rag_pipeline_framework.core.orchestrator: Pipeline complete: {'run_id': '0d97aa34-eccf-4f45-a900-541bd632f39b', 'processed': 3, 'skipped': 0, 'failed': 3, 'elapsed_seconds': 121.70162224769592}
-{
-  "run_id": "0d97aa34-eccf-4f45-a900-541bd632f39b",
-  "processed": 3,
-  "skipped": 0,
-  "failed": 3,
-  "elapsed_seconds": 121.70162224769592
-}
-(venv) PS C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework> 
+Traceback (most recent call last):
+  File "C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\main.py", line 11, in <module>
+    from custom_rag_pipeline_framework.core.orchestrator import RAGDataPipeline
+  File "C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\core\orchestrator.py", line 24, in <module>
+    from custom_rag_pipeline_framework.processing.parsers import DocumentParser
+  File "C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\processing\parsers\__init__.py", line 16, in <module>
+    from custom_rag_pipeline_framework.processing.parsers import (  # noqa: F401
+    ...<8 lines>...
+    )
+  File "C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\processing\parsers\image_parser.py", line 18, in <module>
+    from custom_rag_pipeline_framework.processing.parsers.image_parser import ImageParser
+ImportError: cannot import name 'ImageParser' from partially initialized module 'custom_rag_pipeline_framework.processing.parsers.image_parser' (most likely due to a circular import) (C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\processing\parsers\image_parser.py)
