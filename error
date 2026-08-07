@@ -1,0 +1,55 @@
+87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework\configs\dev.yaml                           
+2026-08-07 09:55:13,175 [INFO] botocore.credentials: Found credentials in shared credentials file: ~/.aws/credentials
+2026-08-07 09:55:14,146 [INFO] custom_rag_pipeline_framework.core.orchestrator: Starting pipeline run=248e26e6-f593-45ad-8919-3385aa3970d9 strategy=full_history target=s3_vectors
+2026-08-07 09:55:14,568 [INFO] custom_rag_pipeline_framework.core.orchestrator: Found 6 files in s3://pske-bde-test-gbbucket/source_files/
+2026-08-07 09:55:14,568 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3
+
+
+2026-08-07 09:55:15,233 [WARNING] custom_rag_pipeline_framework.processing.parsers: Unsupported format: .mp3 for source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3
+2026-08-07 09:55:15,233 [ERROR] custom_rag_pipeline_framework.core.orchestrator: Failed to process source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3:
+ Failed to parse: source_files/audios/CXone recording_Darrell Slawson_2026-01-14_18-18[UTC]_eb8671f1-e846-489c-86f6-769f39b8f4dd.mp3
+
+
+2026-08-07 09:55:15,234 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/images/0000035497.png
+
+
+2026-08-07 09:55:15,333 [WARNING] custom_rag_pipeline_framework.processing.parsers: Unsupported format: .png for source_files/images/0000035497.png
+2026-08-07 09:55:15,333 [ERROR] custom_rag_pipeline_framework.core.orchestrator: Failed to process source_files/images/0000035497.png: Failed to parse: source_files/images/0000035497.png
+
+
+
+2026-08-07 09:55:15,333 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/pdf/allison_operator-manual_040-om8688en-202205-linked-secured_2022_b7f2785c.pdf
+2026-08-07 09:55:15,966 [INFO] custom_rag_pipeline_framework.processing.validators.quality_validator: Validated: source_files/pdf/allison_operator-manual_040-om8688en-202205-linked-secured_2022_b7f2785c.pdf (50277 chars)
+2026-08-07 09:55:15,980 [INFO] custom_rag_pipeline_framework.processing.privacy.pii_processor: Redacted 2 PII entities
+2026-08-07 09:55:15,983 [INFO] custom_rag_pipeline_framework.processing.metadata.tagger: Tagged 116 chunks for source_files/pdf/allison_operator-manual_040-om8688en-202205-linked-secured_2022_b7f2785c.pdf
+2026-08-07 09:55:37,508 [INFO] custom_rag_pipeline_framework.connectors.targets.s3_vectors_target: Put 116 vectors into s3vectors://pske-bde-test-bucket
+2026-08-07 09:55:37,885 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/pdf/allison_operator-manual_041-om9144en-202408-linked-secured_2024_en_736c02d2.pdf
+2026-08-07 09:55:40,882 [INFO] custom_rag_pipeline_framework.processing.validators.quality_validator: Validated: source_files/pdf/allison_operator-manual_041-om9144en-202408-linked-secured_2024_en_736c02d2.pdf (45283 chars)
+2026-08-07 09:55:40,894 [INFO] custom_rag_pipeline_framework.processing.privacy.pii_processor: Redacted 21 PII entities
+2026-08-07 09:55:40,895 [INFO] custom_rag_pipeline_framework.processing.metadata.tagger: Tagged 110 chunks for source_files/pdf/allison_operator-manual_041-om9144en-202408-linked-secured_2024_en_736c02d2.pdf
+2026-08-07 09:56:01,023 [INFO] custom_rag_pipeline_framework.connectors.targets.s3_vectors_target: Put 110 vectors into s3vectors://pske-bde-test-bucket
+2026-08-07 09:56:01,359 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/pdf/allison_operator-manual_042-om9026en-202307-linked-secured_2025_en_15d06047.pdf
+2026-08-07 09:56:05,004 [INFO] custom_rag_pipeline_framework.processing.validators.quality_validator: Validated: source_files/pdf/allison_operator-manual_042-om9026en-202307-linked-secured_2025_en_15d06047.pdf (110633 chars)
+2026-08-07 09:56:05,035 [INFO] custom_rag_pipeline_framework.processing.privacy.pii_processor: Redacted 6 PII entities
+2026-08-07 09:56:05,040 [INFO] custom_rag_pipeline_framework.processing.metadata.tagger: Tagged 253 chunks for source_files/pdf/allison_operator-manual_042-om9026en-202307-linked-secured_2025_en_15d06047.pdf
+2026-08-07 09:56:47,790 [INFO] custom_rag_pipeline_framework.connectors.targets.s3_vectors_target: Put 253 vectors into s3vectors://pske-bde-test-bucket
+2026-08-07 09:56:48,211 [INFO] custom_rag_pipeline_framework.core.orchestrator: Processing: source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
+
+
+
+2026-08-07 09:56:51,804 [WARNING] custom_rag_pipeline_framework.processing.parsers: Unsupported format: .mp4 for source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
+2026-08-07 09:56:51,805 [ERROR] custom_rag_pipeline_framework.core.orchestrator: Failed to process source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4: Failed to parse: source_files/videos/how2_-cummins-isb-egr-cooler-soak-method-how2.mp4
+
+
+
+2026-08-07 09:56:51,807 [INFO] rag_pipeline.metrics: {"_aws": {"Timestamp": 1786111011807, "CloudWatchMetrics": [{"Namespace": "RAGDataPipeline", "Dimensions": [["pipeline"]], "Metrics": [{"Name": "FilesProcessed", "Unit": "Count"}, {"Name": "FilesSkipped", "Unit": "Count"}, {"Name": "FilesFailed", "Unit": "Count"}, {"Name": "RunDurationSeconds", "Unit": "Seconds"}]}]}, "pipeline": "custom_rag", "FilesProcessed": 3, "FilesSkipped": 0, "FilesFailed": 3, "RunDurationSeconds": 97.66066646575928}
+2026-08-07 09:56:52,169 [INFO] rag_pipeline.audit: Audit trail written to s3://pske-bde-test-gbbucket/pipeline_audit/248e26e6-f593-45ad-8919-3385aa3970d9.json
+2026-08-07 09:56:52,171 [INFO] custom_rag_pipeline_framework.core.orchestrator: Pipeline complete: {'run_id': '248e26e6-f593-45ad-8919-3385aa3970d9', 'processed': 3, 'skipped': 0, 'failed': 3, 'elapsed_seconds': 97.66066646575928}
+{
+  "run_id": "248e26e6-f593-45ad-8919-3385aa3970d9",
+  "processed": 3,
+  "skipped": 0,
+  "failed": 3,
+  "elapsed_seconds": 97.66066646575928
+}
+(venv) PS C:\Users\505084739\aura\bde-dataingestion-frmk-master@f87e1ce2a77\RAG_DATA_PIPELINE\custom_rag_pipeline_framework> 
