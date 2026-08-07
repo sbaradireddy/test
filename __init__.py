@@ -1,31 +1,49 @@
-"""processing/parsers package init.
+"""Parser dispatcher - resolves the right BaseParser plugin by file extension.
 
-Auto-discovers and imports every parser plugin module in this package so
-each one's @PARSER_REGISTRY.register(...) decorator fires at import time.
-This means adding a new parser file (audio_parser.py, image_parser.py,
-video_parser.py, or any future *_parser.py / module you drop in here) never
-requires touching this file again.
-
-If you already have explicit imports here (e.g. `from . import csv_parser`),
-it's safe to replace them with this - explicit imports are just a subset of
-what this loop already covers. Non-parser helper modules like normalize.py
-are imported too, which is harmless (they don't register anything).
+Importing this module registers every built-in parser plugin (pdf, docx,
+html, csv, text) with `PARSER_REGISTRY` as a side effect. New formats can be
+added by dropping a new module here that registers under a new name/
+extension, with zero changes to `DocumentParser` itself.
 """
-import importlib
 import logging
-import pkgutil
+from pathlib import Path
+from typing import Optional
+
+from custom_rag_pipeline_framework.core.registry import PARSER_REGISTRY
+
+# Importing submodules registers each parser plugin as a side effect.
+from custom_rag_pipeline_framework.processing.parsers import (  # noqa: F401
+    pdf_parser,
+    docx_parser,
+    html_parser,
+    csv_parser,
+    text_parser,
+)
 
 logger = logging.getLogger(__name__)
 
-_package_name = __name__
-_package_path = __path__
+_EXTENSION_MAP = {
+    ".pdf": "pdf",
+    ".txt": "text",
+    ".docx": "docx",
+    ".html": "html",
+    ".htm": "html",
+    ".csv": "csv",
+}
 
-for _finder, _module_name, _is_pkg in pkgutil.iter_modules(_package_path):
-    if _module_name.startswith("_"):
-        continue  # skip private/dunder modules
-    try:
-        importlib.import_module(f"{_package_name}.{_module_name}")
-    except Exception:
-        logger.exception(f"Failed to import parser module '{_module_name}'")
 
-del _finder, _module_name, _is_pkg, _package_name, _package_path
+class DocumentParser:
+    """Parses various file formats into normalized plain text via the plugin registry."""
+
+    def parse(self, content_bytes: bytes, filename: str) -> Optional[str]:
+        ext = Path(filename).suffix.lower()
+        plugin_name = _EXTENSION_MAP.get(ext)
+        if not plugin_name:
+            logger.warning(f"Unsupported format: {ext} for {filename}")
+            return None
+        try:
+            parser = PARSER_REGISTRY.create(plugin_name)
+            return parser.parse(content_bytes, filename)
+        except Exception as e:
+            logger.error(f"Parse error for {filename}: {e}")
+            return None
